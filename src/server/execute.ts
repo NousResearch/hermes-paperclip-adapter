@@ -40,6 +40,7 @@ import {
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -112,6 +113,84 @@ function loadAgentsMd(agentName: string, workspaceCwd: string): string {
   }
 
   return "";
+}
+
+// ---------------------------------------------------------------------------
+// Model auto-detection from Hermes config.yaml
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal YAML parser for the `model:` section of a Hermes config.yaml.
+ * Extracts `default`, `provider`, and `base_url` fields without requiring
+ * a full YAML library.
+ */
+function parseYamlModelSection(content: string): Record<string, string> {
+    const lines = content.split("\n");
+    const result: Record<string, string> = {};
+    let inModelSection = false;
+    let modelIndent = 0;
+    for (const line of lines) {
+        if (/^model:\s*$/.test(line)) { inModelSection = true; modelIndent = 0; continue; }
+        if (inModelSection) {
+            if (/^[a-zA-Z]/.test(line) && !line.startsWith(" ")) break;
+            const nestedMatch = line.match(/^(\s+)(default|provider|base_url):\s*(.+)$/);
+            if (nestedMatch) {
+                const [, indent, key, value] = nestedMatch;
+                if (modelIndent === 0) modelIndent = indent.length;
+                if (indent.length === modelIndent) result[key] = value.trim().replace(/^['"]|['"]$/g, "");
+            }
+        }
+    }
+    return result;
+}
+
+/**
+ * Detects the HERMES_HOME directory for a given Hermes command by reading
+ * wrapper scripts (e.g. `hermes-grok`, `hermes-35b`) that set HERMES_HOME.
+ * Falls back to `~/.hermes`.
+ */
+function detectHermesHome(hermesCmd: string): string {
+    try {
+        if (hermesCmd && hermesCmd !== HERMES_CLI) {
+            const cmdPaths = [
+                resolve("/usr/local/bin", hermesCmd),
+                resolve(homedir(), ".local", "bin", hermesCmd),
+                resolve(homedir(), "bin", hermesCmd),
+            ];
+            for (const cmdPath of cmdPaths) {
+                if (existsSync(cmdPath)) {
+                    const script = readFileSync(cmdPath, "utf8");
+                    const match = script.match(/HERMES_HOME\s*=\s*["']?([^"'\s]+)/);
+                    if (match?.[1]) return match[1].replace(/\$HOME/g, homedir()).replace(/~/, homedir());
+                }
+            }
+        }
+    } catch { /* ignore */ }
+    return resolve(homedir(), ".hermes");
+}
+
+/**
+ * Auto-detects the current model from the Hermes derivat's config.yaml.
+ * This avoids using the hardcoded DEFAULT_MODEL (anthropic/claude-sonnet-4)
+ * when a local model is configured in the Hermes instance.
+ */
+function detectCurrentModel(hermesCmd: string): { model: string | null; provider: string | null; baseUrl: string | null } {
+    const hermesHome = detectHermesHome(hermesCmd);
+    try {
+        const configPath = resolve(hermesHome, "config.yaml");
+        if (existsSync(configPath)) {
+            const content = readFileSync(configPath, "utf8");
+            const modelCfg = parseYamlModelSection(content);
+            if (modelCfg.default) return { model: modelCfg.default, provider: modelCfg.provider || null, baseUrl: modelCfg.base_url || null };
+        }
+        const envPath = resolve(hermesHome, ".env");
+        if (existsSync(envPath)) {
+            const content = readFileSync(envPath, "utf8");
+            const match = content.match(/^LLM_MODEL\s*=\s*(.+)$/m);
+            if (match?.[1]) return { model: match[1].trim().replace(/^['"]|['"]$/g, ""), provider: null, baseUrl: null };
+        }
+    } catch { /* ignore */ }
+    return { model: null, provider: null, baseUrl: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -346,8 +425,10 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
-  const provider = cfgString(config.provider);
+  const configuredModel = cfgString(config.model);
+  const detected = detectCurrentModel(hermesCmd);
+  const model = configuredModel || detected.model || DEFAULT_MODEL;
+  const provider = cfgString(config.provider) || detected.provider;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
