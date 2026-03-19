@@ -12,8 +12,9 @@
  *   --provider         inference provider (auto, openrouter, nous, etc.)
  *   -r/--resume        resume session by ID
  *   -w/--worktree      isolated git worktree
- *   -v/--verbose       verbose output
+ *   -v/--verbose        verbose output
  *   --checkpoints      filesystem checkpoints
+ *   --yolo             skip all permission prompts (required for localhost curl)
  */
 
 import type {
@@ -37,6 +38,9 @@ import {
   VALID_PROVIDERS,
 } from "../shared/constants.js";
 
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -54,6 +58,60 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+function parseObject(v: unknown): Record<string, unknown> {
+  if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+    return v as Record<string, unknown>;
+  }
+  return {};
+}
+
+// ---------------------------------------------------------------------------
+// Session-ID validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid Hermes session IDs follow the pattern: YYYYMMDD_HHMMSS_<alphanum>
+ * Invalid session IDs cause "Session not found" infinite loops.
+ */
+const HERMES_SESSION_ID_REGEX = /^\d{8}_\d{6}_[a-zA-Z0-9]+$/;
+
+function isValidSessionId(id: string | undefined): id is string {
+  return id != null && HERMES_SESSION_ID_REGEX.test(id);
+}
+
+// ---------------------------------------------------------------------------
+// AGENTS.md injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads the AGENTS.md file for the given agent from the workspace directory.
+ * Tries several name variants (exact, lowercase, kebab-case) to find the file.
+ * This mirrors Claude's --append-system-prompt-file behavior.
+ */
+function loadAgentsMd(agentName: string, workspaceCwd: string): string {
+  if (!agentName || !workspaceCwd) return "";
+
+  const candidates = [
+    agentName,
+    agentName.toLowerCase(),
+    agentName.toLowerCase().replace(/\s+/g, "-"),
+    agentName.toLowerCase().replace(/[.\s]+/g, "-"),
+  ];
+
+  for (const name of candidates) {
+    const agentsFile = resolve(workspaceCwd, "agents", name, "AGENTS.md");
+    try {
+      if (existsSync(agentsFile)) {
+        return readFileSync(agentsFile, "utf8").trim();
+      }
+    } catch {
+      // Permission error or similar — skip this candidate
+    }
+  }
+
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -102,15 +160,45 @@ Title: {{taskTitle}}
 4. If truly nothing to do, report briefly.
 {{/noTask}}`;
 
-function buildPrompt(
+async function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-): string {
+  resolvedCwd: string,
+): Promise<string> {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
+  // ── Resolve task details (Fix 5: Issue-Detail Fetch) ─────────────────
+  const resolvedTaskId =
+    cfgString(ctx.config?.taskId) || cfgString(ctx.config?.issueId);
+  let resolvedTaskTitle =
+    cfgString(ctx.config?.taskTitle) || cfgString(ctx.config?.issueTitle) || "";
+  let resolvedTaskBody =
+    cfgString(ctx.config?.taskBody) || cfgString(ctx.config?.issueBody) || "";
+
+  // Paperclip often sends only issueId without title/body in wake context.
+  // Fetch issue details ourselves when they are missing.
+  if (resolvedTaskId && (!resolvedTaskTitle || !resolvedTaskBody)) {
+    try {
+      let apiBase =
+        cfgString(config.paperclipApiUrl) ||
+        process.env.PAPERCLIP_API_URL ||
+        "http://127.0.0.1:3100/api";
+      if (!apiBase.endsWith("/api")) {
+        apiBase = apiBase.replace(/\/+$/, "") + "/api";
+      }
+      const issueResp = await fetch(`${apiBase}/issues/${resolvedTaskId}`);
+      if (issueResp.ok) {
+        const issue = (await issueResp.json()) as Record<string, unknown>;
+        resolvedTaskTitle =
+          resolvedTaskTitle || cfgString(issue.title as string) || "";
+        resolvedTaskBody =
+          resolvedTaskBody || cfgString(issue.description as string) || "";
+      }
+    } catch {
+      // Non-fatal: agent can still fetch details itself via curl
+    }
+  }
+
   const agentName = ctx.agent?.name || "Hermes Agent";
   const companyName = cfgString(ctx.config?.companyName) || "";
   const projectName = cfgString(ctx.config?.projectName) || "";
@@ -120,7 +208,6 @@ function buildPrompt(
     cfgString(config.paperclipApiUrl) ||
     process.env.PAPERCLIP_API_URL ||
     "http://127.0.0.1:3100/api";
-  // Ensure /api suffix
   if (!paperclipApiUrl.endsWith("/api")) {
     paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
   }
@@ -131,9 +218,9 @@ function buildPrompt(
     companyId: ctx.agent?.companyId || "",
     companyName,
     runId: ctx.runId || "",
-    taskId: taskId || "",
-    taskTitle,
-    taskBody,
+    taskId: resolvedTaskId || "",
+    taskTitle: resolvedTaskTitle,
+    taskBody: resolvedTaskBody,
     projectName,
     paperclipApiUrl,
   };
@@ -144,17 +231,25 @@ function buildPrompt(
   // {{#taskId}}...{{/taskId}} — include if task is assigned
   rendered = rendered.replace(
     /\{\{#taskId\}\}([\s\S]*?)\{\{\/taskId\}\}/g,
-    taskId ? "$1" : "",
+    resolvedTaskId ? "$1" : "",
   );
 
   // {{#noTask}}...{{/noTask}} — include if no task
   rendered = rendered.replace(
     /\{\{#noTask\}\}([\s\S]*?)\{\{\/noTask\}\}/g,
-    taskId ? "" : "$1",
+    resolvedTaskId ? "" : "$1",
   );
 
   // Replace remaining {{variable}} placeholders
-  return renderTemplate(rendered, vars);
+  let prompt = renderTemplate(rendered, vars);
+
+  // ── AGENTS.md injection (Fix 1) ──────────────────────────────────────
+  const agentsFileContent = loadAgentsMd(agentName, resolvedCwd);
+  if (agentsFileContent) {
+    prompt = agentsFileContent + "\n\n---\n\n" + prompt;
+  }
+
+  return prompt;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +299,11 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     if (legacyMatch?.[1]) {
       result.sessionId = legacyMatch[1];
     }
+  }
+
+  // Validate extracted session ID (Fix 4)
+  if (result.sessionId && !isValidSessionId(result.sessionId)) {
+    result.sessionId = undefined;
   }
 
   // Extract token usage
@@ -256,8 +356,21 @@ export async function execute(
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
-  // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  // ── Resolve working directory ──────────────────────────────────────────
+  const resolvedCwd =
+    cfgString(config.cwd) ||
+    cfgString(parseObject(ctx.context?.paperclipWorkspace).cwd) ||
+    cfgString(ctx.config?.workspaceDir) ||
+    ".";
+  let resolvedCwdAbsolute: string;
+  try {
+    resolvedCwdAbsolute = await ensureAbsoluteDirectory(resolvedCwd);
+  } catch {
+    resolvedCwdAbsolute = resolve(resolvedCwd);
+  }
+
+  // ── Build prompt (async — may fetch issue details) ─────────────────────
+  const prompt = await buildPrompt(ctx, config, resolvedCwdAbsolute);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
@@ -280,11 +393,19 @@ export async function execute(
   if (checkpoints) args.push("--checkpoints");
   if (cfgBoolean(config.verbose) === true) args.push("-v");
 
-  // Session resume
+  // ── --yolo flag (Fix 3) ────────────────────────────────────────────────
+  // When dangerouslySkipPermissions is enabled, pass --yolo to Hermes CLI.
+  // Without this, Hermes' security scanner blocks curl to localhost (127.0.0.1)
+  // with exit -1, preventing the agent from communicating with Paperclip API.
+  if (cfgBoolean(config.dangerouslySkipPermissions) === true) {
+    args.push("--yolo");
+  }
+
+  // Session resume — validate session ID format (Fix 4)
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
-  if (persistSession && prevSessionId) {
+  if (persistSession && isValidSessionId(prevSessionId)) {
     args.push("--resume", prevSessionId);
   }
 
@@ -302,18 +423,15 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
+  // ── TERMINAL_CWD injection (Fix 2) ────────────────────────────────────
+  // Hermes Terminal is stateless — each command starts in a new shell.
+  // TERMINAL_CWD tells Hermes where to execute commands. Without this,
+  // agents start in the wrong directory and get stuck in cd loops.
+  env.TERMINAL_CWD = resolvedCwdAbsolute;
+
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
-  }
-
-  // ── Resolve working directory ──────────────────────────────────────────
-  const cwd =
-    cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
-  try {
-    await ensureAbsoluteDirectory(cwd);
-  } catch {
-    // Non-fatal
   }
 
   // ── Log start ──────────────────────────────────────────────────────────
@@ -321,7 +439,7 @@ export async function execute(
     "stdout",
     `[hermes] Starting Hermes Agent (model=${model}, timeout=${timeoutSec}s)\n`,
   );
-  if (prevSessionId) {
+  if (isValidSessionId(prevSessionId)) {
     await ctx.onLog(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,
@@ -330,7 +448,7 @@ export async function execute(
 
   // ── Execute ────────────────────────────────────────────────────────────
   const result = await runChildProcess(ctx.runId, hermesCmd, args, {
-    cwd,
+    cwd: resolvedCwdAbsolute,
     env,
     timeoutSec,
     graceSec,
@@ -374,10 +492,13 @@ export async function execute(
     executionResult.summary = parsed.response.slice(0, 2000);
   }
 
-  // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
+  // Store session ID for next run (only if valid format)
+  if (persistSession && isValidSessionId(parsed.sessionId)) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  } else if (persistSession && parsed.sessionId) {
+    // Invalid session ID extracted — clear it to prevent loops
+    executionResult.sessionParams = null;
   }
 
   return executionResult;
