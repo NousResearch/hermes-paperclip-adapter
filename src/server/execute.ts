@@ -302,6 +302,11 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
+  // Inject the per-run JWT so Hermes tools (terminal, execute_code) can
+  // authenticate against the Paperclip API via $PAPERCLIP_API_KEY.
+  // Without this, agents cannot call the API from curl or Python.
+  if (ctx.authToken) env.PAPERCLIP_API_KEY = ctx.authToken;
+
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
