@@ -293,18 +293,60 @@ export async function execute(
   }
 
   // ── Build environment ──────────────────────────────────────────────────
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...buildPaperclipEnv(ctx.agent),
-  };
+  // Security: use an allowlist instead of forwarding all of process.env.
+  // This prevents Paperclip secrets (DATABASE_URL, BETTER_AUTH_SECRET, etc.)
+  // from leaking into the Hermes child process.
+  const ENV_ALLOWLIST: readonly string[] = [
+    // System essentials
+    "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP",
+    "USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH", "APPDATA",
+    "LOCALAPPDATA", "PROGRAMFILES", "WINDIR",
+    // Node/Python runtime
+    "NODE_ENV", "PYTHONUTF8", "PYTHONIOENCODING",
+    // Hermes-specific
+    "HERMES_HOME", "HERMES_INFERENCE_PROVIDER",
+    // LLM provider keys
+    "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+    "OPENAI_BASE_URL", "NOUS_API_KEY",
+    // Paperclip agent identity (set by buildPaperclipEnv)
+    "PAPERCLIP_AGENT_ID", "PAPERCLIP_COMPANY_ID", "PAPERCLIP_API_KEY",
+    "PAPERCLIP_API_URL", "PAPERCLIP_RUN_ID", "PAPERCLIP_TASK_ID",
+    // Git
+    "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR",
+    // Discord gateway
+    "DISCORD_BOT_TOKEN", "DISCORD_ALLOWED_USERS",
+    "DISCORD_REQUIRE_MENTION", "DISCORD_AUTO_THREAD",
+    "DISCORD_HOME_CHANNEL", "DISCORD_HOME_CHANNEL_NAME",
+    "DISCORD_FREE_RESPONSE_CHANNELS",
+    // Honcho
+    "HONCHO_API_KEY",
+    // ACP
+    "HERMES_COPILOT_ACP_COMMAND", "HERMES_COPILOT_ACP_ARGS",
+  ];
+  const env: Record<string, string> = {};
+  for (const key of ENV_ALLOWLIST) {
+    if (process.env[key] !== undefined) {
+      env[key] = process.env[key]!;
+    }
+  }
+  Object.assign(env, buildPaperclipEnv(ctx.agent));
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
+  const userEnv = config.env;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    // Unwrap Paperclip secret-wrapped values: {type:"plain",value:"..."} → "..."
+    for (const [key, val] of Object.entries(userEnv as Record<string, unknown>)) {
+      if (val && typeof val === "object" && "value" in val) {
+        env[key] = String((val as { value: unknown }).value);
+      } else if (typeof val === "string") {
+        env[key] = val;
+      } else {
+        env[key] = String(val);
+      }
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
@@ -377,7 +419,11 @@ export async function execute(
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    // Use the full session ID as display ID. Hermes IDs are ~22 chars
+    // (YYYYMMDD_HHMMSS_6hex), well within Paperclip's 128-char limit.
+    // The old .slice(0, 16) truncated e.g. "20260323_082850_1e22dc" to
+    // "20260323_082850_" which broke --resume on the next heartbeat.
+    executionResult.sessionDisplayId = parsed.sessionId;
   }
 
   return executionResult;
