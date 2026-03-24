@@ -80,26 +80,32 @@ Title: {{taskTitle}}
 ## Workflow
 
 1. Work on the task using your tools
-2. When done, mark the issue as completed:
-   \`curl -s -X PATCH "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
-3. Report what you did
+2. Post a summary comment of what you did:
+   \`curl -s -X POST "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -d "{\\\"body\\\": \\\"$(your summary here - describe what you did, findings, and any next steps)\\\"}"\`
+3. Mark the issue as completed:
+   \`curl -s -X PATCH "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -d '{"status":"done"}'\`
+4. Report what you did
 {{/taskId}}
 
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
 
 1. List issues assigned to you:
-   \`curl -s "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}&status=todo" | python3 -m json.tool\`
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}&status=todo" | python3 -m json.tool\`
 
 2. If issues found, pick the highest priority one and work on it:
-   - Checkout: \`curl -s -X POST "{{paperclipApiUrl}}/issues/ISSUE_ID/checkout" -H "Content-Type: application/json" -d '{"agentId":"{{agentId}}"}'\`
+   - Checkout: \`curl -s -X POST "{{paperclipApiUrl}}/issues/ISSUE_ID/checkout" -H "Content-Type: application/json" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -d '{"agentId":"{{agentId}}"}'\`
    - Do the work
-   - Complete: \`curl -s -X PATCH "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"status":"done"}'\`
+   - Post a summary comment: \`curl -s -X POST "{{paperclipApiUrl}}/issues/ISSUE_ID/comments" -H "Content-Type: application/json" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -d "{\\\"body\\\": \\\"$(your summary - describe findings, actions taken, and next steps)\\\"}"\`
+   - Complete: \`curl -s -X PATCH "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -d '{"status":"done"}'\`
 
-3. If no issues found, check for any unassigned issues:
-   \`curl -s "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -m json.tool\`
+3. If no assigned issues found, check for unassigned issues:
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -m json.tool\`
 
-4. If truly nothing to do, report briefly.
+4. If truly nothing to do, post a brief status comment on the most recently active issue:
+   \`curl -s -X POST "{{paperclipApiUrl}}/issues/ISSUE_ID/comments" -H "Content-Type: application/json" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -d "{\\\"body\\\": \\\"$(brief status report)\\\"}"\`
+
+5. Report briefly.
 {{/noTask}}`;
 
 function buildPrompt(
@@ -245,7 +251,9 @@ export async function execute(
   const config = (ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
 
   // ── Resolve configuration ──────────────────────────────────────────────
-  const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
+  const wslMode = cfgBoolean(config.wslMode) === true;
+  const hermesPath = cfgString(config.hermesCommand) || HERMES_CLI;
+  const hermesCmd = wslMode ? "wsl.exe" : hermesPath;
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const provider = cfgString(config.provider);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
@@ -262,7 +270,9 @@ export async function execute(
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) !== false; // default true
-  const args: string[] = ["chat", "-q", prompt];
+  const args: string[] = wslMode
+    ? [hermesPath, "chat", "-q", prompt]
+    : ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
   args.push("-m", model);
