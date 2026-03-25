@@ -1,14 +1,7 @@
 {
-  "name": "hermes-paperclip-adapter",
-  "version": "0.1.1",
+  "name": "@henkey/hermes-paperclip-adapter",
+  "version": "0.1.6",
   "description": "Paperclip adapter for Hermes Agent — run Hermes as a managed employee in a Paperclip company",
-  "type": "module",
-  "license": "MIT",
-  "author": "Nous Research",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/NousResearch/hermes-paperclip-adapter"
-  },
   "keywords": [
     "paperclip",
     "hermes",
@@ -17,12 +10,27 @@
     "adapter",
     "orchestration"
   ],
+  "homepage": "https://github.com/NousResearch/hermes-paperclip-adapter#readme",
+  "bugs": {
+    "url": "https://github.com/NousResearch/hermes-paperclip-adapter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NousResearch/hermes-paperclip-adapter.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Nous Research",
+  "type": "module",
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/server/index.js",
     "./ui": "./dist/ui/index.js",
     "./cli": "./dist/cli/index.js"
   },
+  "main": "index.js",
   "files": [
     "dist"
   ],
@@ -34,7 +42,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@paperclipai/adapter-utils": "^0.3.0",
+    "@paperclipai/adapter-utils": "^2026.325.0",
     "picocolors": "^1.1.0"
   },
   "devDependencies": {

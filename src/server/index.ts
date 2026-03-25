@@ -4,6 +4,11 @@
 
 export { execute } from "./execute.js";
 export { testEnvironment } from "./test.js";
+export {
+  listHermesSkills as listSkills,
+  syncHermesSkills as syncSkills,
+  resolveHermesDesiredSkillNames as resolveDesiredSkillNames,
+} from "./skills.js";
 
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 
