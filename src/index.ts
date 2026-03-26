@@ -17,19 +17,15 @@ export const label = ADAPTER_LABEL;
 /**
  * Models available through Hermes Agent.
  *
- * Hermes supports any model via OpenRouter, Anthropic, or OpenAI APIs.
- * This list contains commonly used defaults — the actual available models
- * depend on the user's configured API keys and provider.
+ * Hermes supports any model via any provider — the list is empty
+ * and the UI uses detectModel() + free-text input instead.
  */
-export const models: { id: string; label: string }[] = [
-  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4 (Anthropic)" },
-  { id: "anthropic/claude-opus-4", label: "Claude Opus 4 (Anthropic)" },
-  { id: "openai/gpt-4.1", label: "GPT-4.1 (OpenAI)" },
-  { id: "openai/o3", label: "o3 (OpenAI)" },
-  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro (Google)" },
-  { id: "deepseek/deepseek-r1", label: "DeepSeek R1" },
-  { id: "anthropic/claude-haiku-3.5", label: "Claude Haiku 3.5 (Anthropic)" },
-];
+/**
+ * Hermes supports any model via any provider — no fixed list.
+ * The UI uses detectModel() to show the user's current config
+ * and allows free-text input for any model ID.
+ */
+export const models: { id: string; label: string }[] = [];
 
 /**
  * Documentation shown in the Paperclip UI when configuring a Hermes agent.

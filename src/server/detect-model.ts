@@ -61,7 +61,7 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
     }
 
     if (inModelSection) {
-      const match = trimmed.match(/^(\w+)\s*:\s*(.+)$/);
+      const match = trimmed.match(/^\s*(\w+)\s*:\s*(.+)$/);
       if (match) {
         const key = match[1];
         const val = match[2].trim().replace(/^['"]|['"]$/g, "");
@@ -72,11 +72,6 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
   }
 
   if (!model) return null;
-
-  // If provider is set and model doesn't already include provider prefix
-  if (provider && provider !== "auto" && !model.includes("/")) {
-    model = `${provider}/${model}`;
-  }
 
   return { model, provider, source: "config" };
 }
