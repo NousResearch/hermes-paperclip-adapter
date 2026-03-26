@@ -362,6 +362,10 @@ export async function execute(
   if (checkpoints) args.push("--checkpoints");
   if (cfgBoolean(config.verbose) === true) args.push("-v");
 
+  // Tag sessions as "tool" source so they don't clutter the user's session history.
+  // Requires hermes-agent >= PR #3208 (feat/session-source-tag).
+  args.push("--source", "tool");
+
   // Session resume
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
