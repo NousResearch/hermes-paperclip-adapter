@@ -17,8 +17,9 @@ export const label = ADAPTER_LABEL;
 /**
  * Models available through Hermes Agent.
  *
- * Hermes supports any model via any provider — the list is empty
- * and the UI uses detectModel() + free-text input instead.
+ * Hermes supports any model via any provider. The Paperclip UI should
+ * prefer detectModel() plus manual entry over curated placeholder models,
+ * since Hermes availability depends on the user's local configuration.
  */
 export const models: { id: string; label: string }[] = [];
 
@@ -40,7 +41,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| model | string | anthropic/claude-sonnet-4 | Model to use (provider/model format) |
+| model | string | (Hermes configured default) | Optional explicit model in provider/model format. Leave blank to use Hermes's configured default model. |
 | provider | string | (auto) | API provider: auto, openrouter, nous, openai-codex, zai, kimi-coding, minimax, minimax-cn. Usually not needed — Hermes auto-detects from model name. |
 | timeoutSec | number | 300 | Execution timeout in seconds |
 | graceSec | number | 10 | Grace period after SIGTERM before SIGKILL |

@@ -33,7 +33,6 @@ import {
   HERMES_CLI,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
-  DEFAULT_MODEL,
   VALID_PROVIDERS,
 } from "../shared/constants.js";
 
@@ -263,28 +262,9 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
-    const cleanLines = stdout
-      .split("\n")
-      .filter((line) => {
-        const t = line.trim();
-        if (!t) return false;
-        if (t.startsWith("[tool]") || t.startsWith("[hermes]") || t.startsWith("[paperclip]")) return false;
-        if (t.startsWith("session_id:")) return false;
-        if (/^\[\d{4}-\d{2}-\d{2}T/.test(t)) return false; // timestamp logs
-        if (/^\[done\]\s*┊/.test(t)) return false; // done tool lines
-        if (/^┊\s*[\p{Emoji_Presentation}]/u.test(t) && !/^┊\s*💬/.test(t)) return false; // tool ┊ lines (not assistant)
-        if (/^\p{Emoji_Presentation}\s*(Completed|Running|Error)?\s*$/u.test(t)) return false; // spinner remnants
-        return true;
-      })
-      .map((line) => {
-        // Strip ┊ 💬 prefix from assistant lines
-        let t = line.replace(/^[\s]*┊\s*💬\s*/, "").trim();
-        // Strip [done] prefix
-        t = t.replace(/^\[done\]\s*/, "").trim();
-        return t;
-      });
-    if (cleanLines.length > 0) {
-      result.response = cleanLines.join("\n");
+    const cleaned = cleanResponse(stdout);
+    if (cleaned.length > 0) {
+      result.response = cleaned;
     }
   }
 
@@ -328,7 +308,7 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  const model = cfgString(config.model);
   const provider = cfgString(config.provider);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
@@ -347,7 +327,9 @@ export async function execute(
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  args.push("-m", model);
+  if (model) {
+    args.push("-m", model);
+  }
 
   // Only pass --provider if it's a valid Hermes provider choice.
   if (provider && (VALID_PROVIDERS as readonly string[]).includes(provider)) {
@@ -405,7 +387,7 @@ export async function execute(
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
-    `[hermes] Starting Hermes Agent (model=${model}, timeout=${timeoutSec}s)\n`,
+    `[hermes] Starting Hermes Agent (model=${model ?? "configured-default"}, timeout=${timeoutSec}s)\n`,
   );
   if (prevSessionId) {
     await ctx.onLog(
@@ -463,7 +445,7 @@ export async function execute(
     signal: result.signal,
     timedOut: result.timedOut,
     provider: provider || null,
-    model,
+    model: model || null,
   };
 
   if (parsed.errorMessage) {

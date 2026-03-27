@@ -1,12 +1,12 @@
 # Paperclip Adapter for Hermes Agent
 
-An enhanced [Paperclip](https://paperclip.ing) adapter that lets you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a managed employee in a Paperclip company.
+A [Paperclip](https://paperclip.ing) adapter that lets you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a managed employee in a Paperclip company.
 
-Built on top of Hermes Agent by [Nous Research](https://nousresearch.com), this fork extends the adapter with richer Paperclip integration, broader provider support, and production-hardened output handling.
+Hermes Agent is a full-featured AI agent by [Nous Research](https://nousresearch.com) with 30+ native tools, persistent memory, session persistence, 80+ skills, MCP support, and multi-provider model access.
 
-## Why This Fork?
+## Key Features
 
-This adapter goes beyond the upstream Nous adapter with:
+This adapter provides:
 
 - **8 inference providers** — Anthropic, OpenRouter, OpenAI, Nous, OpenAI Codex, ZAI, Kimi Coding, MiniMax
 - **Skills integration** — Scans both Paperclip-managed and Hermes-native skills (`~/.hermes/skills/`), with sync/list/resolve APIs
@@ -36,7 +36,7 @@ This adapter goes beyond the upstream Nous adapter with:
 ## Installation
 
 ```bash
-npm install @henkey/hermes-paperclip-adapter
+npm install hermes-paperclip-adapter
 ```
 
 ### Prerequisites
@@ -52,7 +52,7 @@ npm install @henkey/hermes-paperclip-adapter
 Add to your Paperclip server's adapter registry (`server/src/adapters/registry.ts`):
 
 ```typescript
-import * as hermesLocal from "@henkey/hermes-paperclip-adapter";
+import * as hermesLocal from "hermes-paperclip-adapter";
 import {
   execute,
   testEnvironment,
@@ -60,7 +60,7 @@ import {
   listSkills,
   syncSkills,
   sessionCodec,
-} from "@henkey/hermes-paperclip-adapter/server";
+} from "hermes-paperclip-adapter/server";
 
 registry.set("hermes_local", {
   ...hermesLocal,
@@ -210,7 +210,7 @@ Paperclip UI can display both managed and native skills in one view.
 ## Development
 
 ```bash
-git clone https://github.com/HenkDz/hermes-paperclip-adapter
+git clone https://github.com/NousResearch/hermes-paperclip-adapter
 cd hermes-paperclip-adapter
 npm install
 npm run build
@@ -219,10 +219,6 @@ npm run build
 ## License
 
 MIT — see [LICENSE](LICENSE)
-
-## Credits
-
-This adapter is built on top of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com). The upstream adapter repository is at [NousResearch/hermes-paperclip-adapter](https://github.com/NousResearch/hermes-paperclip-adapter).
 
 ## Links
 
