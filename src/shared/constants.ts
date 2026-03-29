@@ -11,8 +11,10 @@ export const ADAPTER_LABEL = "Hermes Agent";
 /** Default CLI binary name. */
 export const HERMES_CLI = "hermes";
 
-/** Default timeout for a single execution run (seconds). */
-export const DEFAULT_TIMEOUT_SEC = 300;
+/** Default timeout for a single execution run (seconds).
+ * 600s accommodates Windows cold starts and CEO-level tasks with tool use.
+ * Per-agent overrideable via adapterConfig.timeoutSec. */
+export const DEFAULT_TIMEOUT_SEC = 600;
 
 /** Grace period after SIGTERM before SIGKILL (seconds). */
 export const DEFAULT_GRACE_SEC = 10;
