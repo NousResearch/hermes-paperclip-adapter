@@ -14,7 +14,8 @@ import type {
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE } from "../shared/constants.js";
+import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
+import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -128,16 +129,28 @@ function checkModel(
   };
 }
 
-function checkApiKeys(): AdapterEnvironmentCheck | null {
-  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
-  const hasOpenRouter = !!process.env.OPENROUTER_API_KEY;
-  const hasOpenAI = !!process.env.OPENAI_API_KEY;
+function checkApiKeys(
+  config: Record<string, unknown>,
+): AdapterEnvironmentCheck | null {
+  // The server resolves secret refs into config.env before calling testEnvironment,
+  // so we check config.env first (adapter-configured secrets), then fall back to
+  // process.env (server/host environment).
+  const envConfig = (config.env ?? {}) as Record<string, string>;
+  const has = (key: string) =>
+    !!(envConfig[key] ?? process.env[key]);
 
-  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI) {
+  const hasAnthropic = has("ANTHROPIC_API_KEY");
+  const hasOpenRouter = has("OPENROUTER_API_KEY");
+  const hasOpenAI = has("OPENAI_API_KEY");
+  const hasZai = has("ZAI_API_KEY");
+  const hasKimi = has("KIMI_API_KEY");
+  const hasMiniMax = has("MINIMAX_API_KEY");
+
+  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI && !hasZai && !hasKimi && !hasMiniMax) {
     return {
       level: "warn",
       message: "No LLM API keys found in environment",
-      hint: "Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY. Hermes may also have keys configured in ~/.hermes/.env",
+      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
       code: "hermes_no_api_keys",
     };
   }
@@ -146,12 +159,75 @@ function checkApiKeys(): AdapterEnvironmentCheck | null {
   if (hasAnthropic) providers.push("Anthropic");
   if (hasOpenRouter) providers.push("OpenRouter");
   if (hasOpenAI) providers.push("OpenAI");
+  if (hasZai) providers.push("Z.AI");
+  if (hasKimi) providers.push("Kimi");
+  if (hasMiniMax) providers.push("MiniMax");
 
   return {
     level: "info",
     message: `API keys found: ${providers.join(", ")}`,
     code: "hermes_api_keys_found",
   };
+}
+
+/**
+ * Check provider/model consistency.
+ * Warns if the configured provider might be wrong for the model.
+ */
+async function checkProviderConsistency(
+  config: Record<string, unknown>,
+): Promise<AdapterEnvironmentCheck | null> {
+  const model = asString(config.model);
+  if (!model) return null;
+
+  const explicitProvider = asString(config.provider);
+
+  // Try to detect from Hermes config
+  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  try {
+    detectedConfig = await detectModel();
+  } catch {
+    // Non-fatal
+  }
+
+  const { provider: resolved, resolvedFrom } = resolveProvider({
+    explicitProvider,
+    detectedProvider: detectedConfig?.provider,
+    detectedModel: detectedConfig?.model,
+    model,
+  });
+
+  // If provider was explicitly set but doesn't match what Hermes config says,
+  // that's worth flagging.
+  if (explicitProvider && detectedConfig?.provider && explicitProvider !== detectedConfig.provider) {
+    return {
+      level: "warn",
+      message: `Provider mismatch: adapterConfig has "${explicitProvider}" but ~/.hermes/config.yaml has "${detectedConfig.provider}". Using adapterConfig value.`,
+      hint: `Model "${model}" may not work correctly with provider "${explicitProvider}". Consider aligning with your Hermes config or removing the explicit provider to use auto-detection.`,
+      code: "hermes_provider_mismatch",
+    };
+  }
+
+  // If provider was auto-detected (not explicitly set), log what was resolved
+  if (!explicitProvider && resolvedFrom !== "auto") {
+    return {
+      level: "info",
+      message: `Provider auto-detected as "${resolved}" (from ${resolvedFrom}) for model "${model}"`,
+      code: "hermes_provider_detected",
+    };
+  }
+
+  // If we couldn't resolve any provider, warn
+  if (resolvedFrom === "auto" && !explicitProvider) {
+    return {
+      level: "warn",
+      message: `Could not determine provider for model "${model}" — will use Hermes auto-detection`,
+      hint: "Set an explicit provider in the agent config or ensure ~/.hermes/config.yaml has a matching provider for this model.",
+      code: "hermes_provider_unknown",
+    };
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +267,13 @@ export async function testEnvironment(
   const modelCheck = checkModel(config);
   if (modelCheck) checks.push(modelCheck);
 
-  // 5. API keys
-  const apiKeyCheck = checkApiKeys();
+  // 5. API keys (check config.env — server resolves secrets before calling us)
+  const apiKeyCheck = checkApiKeys(config);
   if (apiKeyCheck) checks.push(apiKeyCheck);
+
+  // 6. Provider/model consistency
+  const providerCheck = await checkProviderConsistency(config);
+  if (providerCheck) checks.push(providerCheck);
 
   // Determine overall status
   const hasErrors = checks.some((c) => c.level === "error");

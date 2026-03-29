@@ -22,18 +22,63 @@ export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
 
 /**
  * Valid --provider choices for the hermes CLI.
- * When not specified, Hermes auto-detects from model name.
+ * Must stay in sync with `hermes chat --help`.
  */
 export const VALID_PROVIDERS = [
   "auto",
   "openrouter",
   "nous",
   "openai-codex",
+  "copilot",
+  "copilot-acp",
+  "anthropic",
+  "huggingface",
   "zai",
   "kimi-coding",
   "minimax",
   "minimax-cn",
+  "kilocode",
 ] as const;
+
+/**
+ * Model-name prefix → provider hint mapping.
+ * Used when no explicit provider is configured and we need to infer
+ * the correct provider from the model string alone.
+ *
+ * Keys are lowercased prefix patterns; values must be valid provider names.
+ * Longer prefixes are matched first (order matters).
+ */
+export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
+  // OpenAI-native models
+  ["gpt-4", "openai-codex"],
+  ["gpt-5", "copilot"],
+  ["o1-", "openai-codex"],
+  ["o3-", "openai-codex"],
+  ["o4-", "openai-codex"],
+  // Anthropic models
+  ["claude", "anthropic"],
+  // Google models (via openrouter or direct)
+  ["gemini", "auto"],
+  // Nous models
+  ["hermes-", "nous"],
+  // Z.AI / GLM models
+  ["glm-", "zai"],
+  // Kimi / Moonshot
+  ["moonshot", "kimi-coding"],
+  ["kimi", "kimi-coding"],
+  // MiniMax
+  ["minimax", "minimax"],
+  // DeepSeek
+  ["deepseek", "auto"],
+  // Meta Llama
+  ["llama", "auto"],
+  // Qwen
+  ["qwen", "auto"],
+  // Mistral
+  ["mistral", "auto"],
+  // HuggingFace models (org/model format)
+  ["huggingface/", "huggingface"],
+];
 
 /** Regex to extract session ID from Hermes CLI output. */
 export const SESSION_ID_REGEX = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;

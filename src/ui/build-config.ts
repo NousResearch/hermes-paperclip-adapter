@@ -3,6 +3,11 @@
  *
  * Translates Paperclip's CreateConfigValues into the adapterConfig
  * object stored in the agent record.
+ *
+ * NOTE: Provider resolution happens at runtime in execute.ts, not here.
+ * The UI may or may not pass a provider field. If it does, we persist it
+ * as the user's explicit override. If not, execute.ts will detect it from
+ * ~/.hermes/config.yaml at runtime.
  */
 
 import type { CreateConfigValues } from "@paperclipai/adapter-utils";
@@ -22,6 +27,17 @@ export function buildHermesConfig(
 
   // Model
   ac.model = v.model || DEFAULT_MODEL;
+
+  // NOTE: Provider is NOT set here because the Paperclip UI form
+  // (CreateConfigValues) does not expose a provider field.
+  // Instead, provider is resolved at runtime in execute.ts using
+  // a priority chain:
+  //   1. adapterConfig.provider (if set via API directly)
+  //   2. ~/.hermes/config.yaml detection
+  //   3. Model-name prefix inference
+  //   4. "auto" fallback
+  // This ensures correct provider routing even for agents created
+  // before provider tracking existed.
 
   // Execution limits
   ac.timeoutSec = DEFAULT_TIMEOUT_SEC;

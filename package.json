@@ -1,6 +1,6 @@
 {
-  "name": "@henkey/hermes-paperclip-adapter",
-  "version": "0.2.0",
+  "name": "hermes-paperclip-adapter",
+  "version": "0.2.1",
   "description": "Paperclip adapter for Hermes Agent — run Hermes as a managed employee in a Paperclip company",
   "keywords": [
     "paperclip",
@@ -10,20 +10,19 @@
     "adapter",
     "orchestration"
   ],
-  "homepage": "https://github.com/HenkDz/hermes-paperclip-adapter#readme",
+  "homepage": "https://github.com/NousResearch/hermes-paperclip-adapter#readme",
   "bugs": {
-    "url": "https://github.com/HenkDz/hermes-paperclip-adapter/issues"
+    "url": "https://github.com/NousResearch/hermes-paperclip-adapter/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HenkDz/hermes-paperclip-adapter.git"
+    "url": "git+https://github.com/NousResearch/hermes-paperclip-adapter.git"
   },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
-  "author": "Henkey",
-  "contributors": ["Nous Research"],
+  "author": "Nous Research",
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
