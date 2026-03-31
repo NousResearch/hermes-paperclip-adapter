@@ -40,8 +40,9 @@ export function buildHermesConfig(
   // This ensures correct provider routing even for agents created
   // before provider tracking existed.
 
-  // Execution limits
-  ac.timeoutSec = DEFAULT_TIMEOUT_SEC;
+  // Execution limits — use the form value when provided, otherwise default
+  const formTimeout = (v as unknown as Record<string, unknown>).timeoutSec;
+  ac.timeoutSec = (typeof formTimeout === "number" && formTimeout >= 0) ? formTimeout : DEFAULT_TIMEOUT_SEC;
   // maxTurnsPerRun maps to Hermes's max_turns (set via config, not CLI flag)
 
   // Session persistence (default: on)
