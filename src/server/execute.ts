@@ -129,14 +129,16 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Read wake context from ctx.context (not ctx.config which holds adapter settings)
+  const context = (ctx.context ?? {}) as Record<string, unknown>;
+  const taskId = cfgString(context.taskId) || cfgString(context.issueId);
+  const taskTitle = cfgString(context.taskTitle) || "";
+  const taskBody = cfgString(context.taskBody) || "";
+  const commentId = cfgString(context.commentId) || cfgString(context.wakeCommentId);
+  const wakeReason = cfgString(context.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = cfgString(context.companyName) || "";
+  const projectName = cfgString(context.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -415,7 +417,9 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  const taskId = cfgString(ctx.config?.taskId);
+  // Read taskId from ctx.context (wake context), not ctx.config (adapter settings)
+  const context = (ctx.context ?? {}) as Record<string, unknown>;
+  const taskId = cfgString(context.taskId) || cfgString(context.issueId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
