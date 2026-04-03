@@ -312,7 +312,7 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
 export async function execute(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
-  const config = (ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+  const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
