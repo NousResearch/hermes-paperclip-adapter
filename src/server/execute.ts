@@ -415,6 +415,8 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
+    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
