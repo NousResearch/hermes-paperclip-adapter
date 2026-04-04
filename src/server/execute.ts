@@ -476,6 +476,7 @@ export async function execute(
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,
+    onSpawn: ctx.onSpawn,
   });
 
   // ── Parse output ───────────────────────────────────────────────────────
