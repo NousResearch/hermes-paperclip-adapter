@@ -1,7 +1,7 @@
 /**
  * Server-side execution logic for the Hermes Agent adapter.
  *
- * Spawns `hermes chat -q "..." -Q` as a child process, streams output,
+ * Spawns `hermes chat -q "..."` as a child process, streams output,
  * and returns structured results to Paperclip.
  *
  * Verified CLI flags (hermes chat):
@@ -358,8 +358,9 @@ export async function execute(
   const prompt = buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
-  // Use -Q (quiet) to get clean output: just response + session_id line
-  const useQuiet = cfgBoolean(config.quiet) !== false; // default true
+  // Default to non-quiet mode so Paperclip receives live [tool], ┊ 💭, and
+  // ┊ 💬 lines. Callers can still opt into quiet mode with adapterConfig.quiet=true.
+  const useQuiet = cfgBoolean(config.quiet) === true; // default false
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 

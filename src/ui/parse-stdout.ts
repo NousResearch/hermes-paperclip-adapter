@@ -1,14 +1,18 @@
 /**
  * Parse Hermes Agent stdout into TranscriptEntry objects for the Paperclip UI.
  *
- * Hermes CLI quiet-mode output patterns:
- *   Assistant:  "  ┊ 💬 {text}"
- *   Tool (TTY): "  ┊ {emoji} {verb:9} {detail}  {duration}"
- *   Tool (pipe): "  [done] ┊ {emoji} {verb:9} {detail}  {duration} ({total})"
- *   System:     "[hermes] ..."
+ * Hermes CLI output patterns:
+ *   Assistant:   "  ┊ 💬 {text}"
+ *   Thinking:    "  ┊ 💭 {text}"
+ *   Tool start:  "  [tool] (｡◕‿◕｡) 💻 $   curl -s \"...\""
+ *   Tool done:   "  ┊ 💻 $   curl -s \"...\"  0.1s"
+ *   Tool done:   "  [done] ┊ 💻 $   curl -s \"...\"  0.1s (0.5s)"
+ *   System:      "[hermes] ..."
  *
- * We emit structured tool_call/tool_result pairs so Paperclip renders proper
- * tool cards (with status icons, expand/collapse) instead of raw stdout blocks.
+ * We emit tool_call when a [tool] start line appears, then emit the matching
+ * tool_result when the completion line arrives. If a completion line arrives
+ * without a pending start line (for example in quiet mode), we synthesize both
+ * entries from that single line as a fallback.
  */
 
 import type { TranscriptEntry } from "@paperclipai/adapter-utils";
@@ -23,8 +27,19 @@ import { TOOL_OUTPUT_PREFIX } from "../shared/constants.js";
  * by only stripping parenthesized kaomoji like (｡◕‿◕｡).
  */
 function stripKaomoji(text: string): string {
-  // Strip parenthesized kaomoji faces: (｡◕‿◕｡), (★ω★), etc.
   return text.replace(/[(][^()]{2,20}[)]\s*/gu, "").trim();
+}
+
+function stripFramePrefix(line: string): string {
+  let cleaned = line.trim().replace(/^\[done\]\s*/, "").replace(/^\[tool\]\s*/, "");
+  if (cleaned.startsWith(TOOL_OUTPUT_PREFIX)) {
+    cleaned = cleaned.slice(TOOL_OUTPUT_PREFIX.length);
+  }
+  return stripKaomoji(cleaned).trim();
+}
+
+function isEmojiToken(token: string): boolean {
+  return /^(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})/u.test(token);
 }
 
 // ── Line classification ────────────────────────────────────────────────────
@@ -39,114 +54,133 @@ function extractAssistantText(line: string): string {
   return line.replace(/^[\s┊]*💬\s*/, "").trim();
 }
 
-/**
- * Parse a tool completion line into structured data.
- *
- * Handles both TTY and pipe formats:
- *   TTY:  ┊ 💻 $         curl -s "..."  0.1s
- *   Pipe: [done] ┊ 💻 $   curl -s "..."  0.1s (0.5s)
- */
-function parseToolCompletionLine(
+function isPipeOutputLine(trimmed: string): boolean {
+  return (
+    trimmed.startsWith(TOOL_OUTPUT_PREFIX) ||
+    /^\[done\]\s*┊/.test(trimmed)
+  );
+}
+
+function isSpinnerNoiseLine(line: string): boolean {
+  const stripped = stripFramePrefix(line);
+  return /^\p{Emoji_Presentation}\s*(Completed|Running|Error)?\s*$/u.test(stripped);
+}
+
+// ── Tool parsing ───────────────────────────────────────────────────────────
+
+interface ParsedToolLine {
+  name: string;
+  detail: string;
+  duration: string;
+  hasError: boolean;
+}
+
+const TOOL_NAME_MAP: Record<string, string> = {
+  "$": "shell",
+  exec: "shell",
+  terminal: "shell",
+  search: "search",
+  fetch: "fetch",
+  crawl: "crawl",
+  navigate: "browser",
+  snapshot: "browser",
+  click: "browser",
+  type: "browser",
+  scroll: "browser",
+  back: "browser",
+  press: "browser",
+  close: "browser",
+  images: "browser",
+  vision: "browser",
+  read: "read",
+  write: "write",
+  patch: "patch",
+  grep: "search",
+  find: "search",
+  plan: "plan",
+  recall: "recall",
+  proc: "process",
+  delegate: "delegate",
+  todo: "todo",
+  memory: "memory",
+  clarify: "clarify",
+  session_search: "recall",
+  code: "execute",
+  execute: "execute",
+  web_search: "search",
+  web_extract: "fetch",
+  browser_navigate: "browser",
+  browser_click: "browser",
+  browser_type: "browser",
+  browser_snapshot: "browser",
+  browser_vision: "browser",
+  browser_scroll: "browser",
+  browser_press: "browser",
+  browser_back: "browser",
+  browser_close: "browser",
+  browser_get_images: "browser",
+  read_file: "read",
+  write_file: "write_file",
+  search_files: "search",
+  patch_file: "patch",
+  execute_code: "execute",
+};
+
+function normalizeToolDetail(detail: string): string {
+  return detail
+    .replace(/\s+/g, " ")
+    .replace(/\s*\[(?:exit \d+|error|full)\]\s*$/i, "")
+    .trim();
+}
+
+function parseToolLine(
   line: string,
-): { name: string; detail: string; duration: string; hasError: boolean } | null {
-  // Strip leading whitespace and [done] prefix
-  let cleaned = line.trim().replace(/^\[done\]\s*/, "");
+  options: { parseDuration?: boolean } = {},
+): ParsedToolLine | null {
+  const cleaned = stripFramePrefix(line);
+  if (!cleaned) return null;
+  if (cleaned.startsWith("💬") || cleaned.startsWith("💭")) return null;
 
-  // Must start with ┊
-  if (!cleaned.startsWith(TOOL_OUTPUT_PREFIX)) return null;
-
-  // Remove ┊ prefix and any leading kaomoji face
-  cleaned = cleaned.slice(TOOL_OUTPUT_PREFIX.length);
-  cleaned = stripKaomoji(cleaned).trim();
-
-  // Now format is: "{emoji} {verb:9} {detail}  {duration}" or "{emoji} {verb:9} {detail}  {duration} ({total})"
-  // Example: "💻 $         curl -s ..." or "🔍 search    pattern  0.1s"
-  // The verb+detail are separated by whitespace, duration is at the end
-
-  // Match: emoji + verb + detail + duration
-  // Duration pattern: N.Ns (possibly followed by (N.Ns))
-  const durationMatch = cleaned.match(/([\d.]+s)\s*(?:\([\d.]+s\))?\s*$/);
-  const duration = durationMatch ? durationMatch[1] : "";
-
-  // Remove duration from the end to get verb + detail
-  let verbAndDetail = durationMatch
+  const durationMatch = options.parseDuration
+    ? cleaned.match(/([\d.]+s)\s*(?:\([\d.]+s\))?\s*$/)
+    : null;
+  const duration = durationMatch?.[1] ?? "";
+  const withoutDuration = durationMatch
     ? cleaned.slice(0, cleaned.lastIndexOf(durationMatch[0])).trim()
     : cleaned;
 
-  // Check for error suffixes
-  const hasError = /\[(?:exit \d+|error|full)\]/.test(verbAndDetail) ||
-    /\[error\]\s*$/.test(cleaned);
+  const hasError =
+    /\[(?:exit \d+|error|full)\]\s*$/i.test(withoutDuration) ||
+    /\[error\]\s*$/i.test(cleaned);
 
-  // The first token (after emoji) is the verb, rest is detail
-  // Verbs are always a single word or symbol ($ for terminal)
-  const parts = verbAndDetail.match(/^(\S+)\s+(.*)/);
-  if (!parts) {
-    return { name: "tool", detail: verbAndDetail, duration, hasError };
+  const tokens = withoutDuration.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  let verb = tokens[0];
+  let detailTokens = tokens.slice(1);
+
+  if (tokens.length >= 2 && isEmojiToken(tokens[0])) {
+    verb = tokens[1];
+    detailTokens = tokens.slice(2);
   }
 
-  const verb = parts[1];
-  const detail = parts[2].trim();
-
-  // Map Hermes verbs to readable tool names
-  const nameMap: Record<string, string> = {
-    "$": "shell",
-    "exec": "shell",
-    "terminal": "shell",
-    "search": "search",
-    "fetch": "fetch",
-    "crawl": "crawl",
-    "navigate": "browser",
-    "snapshot": "browser",
-    "click": "browser",
-    "type": "browser",
-    "scroll": "browser",
-    "back": "browser",
-    "press": "browser",
-    "close": "browser",
-    "images": "browser",
-    "vision": "browser",
-    "read": "read",
-    "write": "write",
-    "patch": "patch",
-    "grep": "search",
-    "find": "search",
-    "plan": "plan",
-    "recall": "recall",
-    "proc": "process",
-    "delegate": "delegate",
-    "todo": "todo",
-    "memory": "memory",
-    "clarify": "clarify",
-    "session_search": "recall",
-    "code": "execute",
-    "execute": "execute",
-    "web_search": "search",
-    "web_extract": "fetch",
-    "browser_navigate": "browser",
-    "browser_click": "browser",
-    "browser_type": "browser",
-    "browser_snapshot": "browser",
-    "browser_vision": "browser",
-    "browser_scroll": "browser",
-    "browser_press": "browser",
-    "browser_back": "browser",
-    "browser_close": "browser",
-    "browser_get_images": "browser",
-    "read_file": "read",
-    "write_file": "write_file",
-    "search_files": "search",
-    "patch_file": "patch",
-    "execute_code": "execute",
-  };
-
-  const name = nameMap[verb.toLowerCase()] || verb;
+  const detail = detailTokens.join(" ").trim();
+  const name = TOOL_NAME_MAP[verb.toLowerCase()] || verb;
 
   return { name, detail, duration, hasError };
 }
 
-// ── Synthetic tool ID generation ────────────────────────────────────────────
+// ── Synthetic tool ID generation + pending tool tracking ───────────────────
 
 let toolCallCounter = 0;
+
+interface PendingToolCall {
+  id: string;
+  name: string;
+  detail: string;
+}
+
+const pendingToolCalls: PendingToolCall[] = [];
 
 /**
  * Generate a synthetic toolUseId for pairing tool_call with tool_result.
@@ -156,15 +190,46 @@ function syntheticToolUseId(): string {
   return `hermes-tool-${++toolCallCounter}`;
 }
 
+function clearPendingToolCalls(): void {
+  pendingToolCalls.length = 0;
+}
+
+function enqueuePendingToolCall(name: string, detail: string): string {
+  const id = syntheticToolUseId();
+  pendingToolCalls.push({ id, name, detail: normalizeToolDetail(detail) });
+  return id;
+}
+
+function takePendingToolCall(name: string, detail: string): string | undefined {
+  if (pendingToolCalls.length === 0) return undefined;
+
+  const normalizedDetail = normalizeToolDetail(detail);
+  const exactIdx = pendingToolCalls.findIndex(
+    (pending) =>
+      pending.name === name &&
+      (pending.detail === normalizedDetail ||
+        pending.detail.startsWith(normalizedDetail) ||
+        normalizedDetail.startsWith(pending.detail)),
+  );
+
+  const idx = exactIdx >= 0 ? exactIdx : 0;
+  return pendingToolCalls.splice(idx, 1)[0]?.id;
+}
+
 // ── Thinking detection ─────────────────────────────────────────────────────
 
 function isThinkingLine(line: string): boolean {
+  const stripped = stripFramePrefix(line);
   return (
-    line.includes("💭") ||
-    line.startsWith("<thinking>") ||
-    line.startsWith("</thinking>") ||
-    line.startsWith("Thinking:")
+    stripped.startsWith("💭") ||
+    stripped.startsWith("<thinking>") ||
+    stripped.startsWith("</thinking>") ||
+    stripped.startsWith("Thinking:")
   );
+}
+
+function extractThinkingText(line: string): string {
+  return stripFramePrefix(line).replace(/^💭\s*/, "").trim();
 }
 
 // ── Main parser ────────────────────────────────────────────────────────────
@@ -172,8 +237,8 @@ function isThinkingLine(line: string): boolean {
 /**
  * Parse a single line of Hermes stdout into transcript entries.
  *
- * Emits structured tool_call/tool_result pairs (with synthetic IDs) so
- * Paperclip renders proper tool cards with status icons and expand/collapse.
+ * Emits structured tool_call and tool_result entries so Paperclip renders
+ * progress incrementally instead of collapsing everything into raw stdout.
  *
  * @param line  Raw stdout line from Hermes CLI
  * @param ts    ISO timestamp for the entry
@@ -188,14 +253,10 @@ export function parseHermesStdoutLine(
 
   // ── System/adapter messages ────────────────────────────────────────────
   if (trimmed.startsWith("[hermes]") || trimmed.startsWith("[paperclip]")) {
+    if (trimmed.startsWith("[hermes] Starting Hermes Agent")) {
+      clearPendingToolCalls();
+    }
     return [{ kind: "system", ts, text: trimmed }];
-  }
-
-  // ── Non-quiet mode tool start lines: [tool] (kaomoji) emoji verb ... ──
-  // These are redundant — the tool_call/tool_result pair arrives later from
-  // the ┊ completion line. Skip them to avoid duplicate entries.
-  if (trimmed.startsWith("[tool]")) {
-    return [];
   }
 
   // ── MCP / server init noise reclassified from stderr by wrappedOnLog ──
@@ -205,67 +266,93 @@ export function parseHermesStdoutLine(
     return [{ kind: "stderr", ts, text: trimmed }];
   }
 
-  // ── Standalone spinner remnants: "💻 Completed", "💻\nCompleted", etc. ─
-  // These are non-quiet mode spinner frame leftovers — skip them.
-  if (/^\p{Emoji_Presentation}\s*(Completed|Running|Error)?\s*$/u.test(trimmed)) {
-    return [];
-  }
-
   // ── Session info line ────────────────────────────────────────────────
   if (trimmed.startsWith("session_id:")) {
     return [{ kind: "system", ts, text: trimmed }];
   }
 
-  // ── Quiet-mode tool/message lines (prefixed with ┊) ────────────────────
-  if (trimmed.includes(TOOL_OUTPUT_PREFIX)) {
+  // ── Standalone spinner remnants: "💻 Completed", "┊ 💻 Completed", etc. ─
+  if (isSpinnerNoiseLine(trimmed)) {
+    return [];
+  }
+
+  // ── Thinking blocks ────────────────────────────────────────────────────
+  // Detect before generic ┊ parsing so ┊ 💭 lines do not degrade to stdout.
+  if (isThinkingLine(trimmed)) {
+    return [
+      {
+        kind: "thinking",
+        ts,
+        text: extractThinkingText(trimmed),
+      },
+    ];
+  }
+
+  // ── Non-quiet mode tool start lines: [tool] (kaomoji) emoji verb ... ───
+  if (trimmed.startsWith("[tool]")) {
+    const toolInfo = parseToolLine(trimmed);
+    if (!toolInfo) return [];
+
+    const toolUseId = enqueuePendingToolCall(toolInfo.name, toolInfo.detail);
+    return [
+      {
+        kind: "tool_call",
+        ts,
+        name: toolInfo.name,
+        input: { detail: toolInfo.detail },
+        toolUseId,
+      },
+    ];
+  }
+
+  // ── Quiet/non-quiet completion + assistant lines (prefixed with ┊) ────
+  if (isPipeOutputLine(trimmed)) {
     // Assistant message: ┊ 💬 {text}
     if (isAssistantToolLine(trimmed)) {
       return [{ kind: "assistant", ts, text: extractAssistantText(trimmed) }];
     }
 
     // Tool completion: ┊ {emoji} {verb} {detail} {duration}
-    const toolInfo = parseToolCompletionLine(trimmed);
+    const toolInfo = parseToolLine(trimmed, { parseDuration: true });
     if (toolInfo) {
-      const id = syntheticToolUseId();
+      const toolUseId = takePendingToolCall(toolInfo.name, toolInfo.detail);
       const detailText = toolInfo.duration
         ? `${toolInfo.detail}  ${toolInfo.duration}`
         : toolInfo.detail;
 
+      if (toolUseId) {
+        return [
+          {
+            kind: "tool_result",
+            ts,
+            toolUseId,
+            content: detailText,
+            isError: toolInfo.hasError,
+          },
+        ];
+      }
+
+      const fallbackToolUseId = syntheticToolUseId();
       return [
         {
-          kind: "tool_call" as const,
+          kind: "tool_call",
           ts,
           name: toolInfo.name,
           input: { detail: toolInfo.detail },
-          toolUseId: id,
+          toolUseId: fallbackToolUseId,
         },
         {
-          kind: "tool_result" as const,
+          kind: "tool_result",
           ts,
-          toolUseId: id,
+          toolUseId: fallbackToolUseId,
           content: detailText,
           isError: toolInfo.hasError,
         },
-      ] as TranscriptEntry[];
+      ];
     }
 
     // Fallback: raw ┊ line that doesn't match tool format
-    const stripped = trimmed
-      .replace(/^\[done\]\s*/, "")
-      .replace(new RegExp(`^${TOOL_OUTPUT_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "")
-      .trim();
-    return [{ kind: "stdout", ts, text: stripped }];
-  }
-
-  // ── Thinking blocks ────────────────────────────────────────────────────
-  if (isThinkingLine(trimmed)) {
-    return [
-      {
-        kind: "thinking",
-        ts,
-        text: trimmed.replace(/^💭\s*/, ""),
-      },
-    ];
+    return [{ kind: "stdout", ts, text: stripFramePrefix(trimmed) }];
   }
 
   // ── Error output ───────────────────────────────────────────────────────
