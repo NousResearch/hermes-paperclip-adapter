@@ -315,7 +315,9 @@ export async function execute(
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
 
   // ── Resolve configuration ──────────────────────────────────────────────
-  const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
+  // Accept both "hermesCommand" (canonical, written by buildHermesConfig) and
+  // "command" (legacy — written by older UI versions or direct API callers).
+  const hermesCmd = cfgString(config.hermesCommand) || cfgString(config.command) || HERMES_CLI;
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
