@@ -54,6 +54,22 @@ test('parseHermesStdoutLine preserves duration-like command args on [tool] start
   assert.equal(entries[0].input.detail, 'sleep 5s');
 });
 
+test('parseHermesStdoutLine compacts python-heavy tool details', () => {
+  parseHermesStdoutLine('[hermes] Starting Hermes Agent (model=alpine-alpha)', ts);
+
+  const entries = parseHermesStdoutLine(
+    '[tool] (｡◕‿◕｡) 💻 $         curl -s "http://127.0.0.1:3100/api/issues/LUK-231/comments" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()))"',
+    ts,
+  );
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, 'tool_call');
+  assert.equal(
+    entries[0].input.detail,
+    'curl -s "http://127.0.0.1:3100/api/issues/LUK-231/comments" | python3 -c <inline script>',
+  );
+});
+
 test('parseHermesStdoutLine falls back to synthetic tool_call+tool_result when only a done line exists', () => {
   parseHermesStdoutLine('[hermes] Starting Hermes Agent (model=alpine-alpha)', ts);
 

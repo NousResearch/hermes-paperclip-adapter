@@ -126,11 +126,27 @@ const TOOL_NAME_MAP: Record<string, string> = {
   execute_code: "execute",
 };
 
+const MAX_TOOL_DETAIL_CHARS = 180;
+
 function normalizeToolDetail(detail: string): string {
   return detail
     .replace(/\s+/g, " ")
     .replace(/\s*\[(?:exit \d+|error|full)\]\s*$/i, "")
     .trim();
+}
+
+function compactToolDetail(detail: string): string {
+  const normalized = normalizeToolDetail(detail)
+    .replace(/python3\s+-c\s+(['"]).*$/i, "python3 -c <inline script>")
+    .replace(/python3\s+-m\s+json\.tool\b.*$/i, "python3 -m json.tool")
+    .replace(/<<'?[A-Z0-9_]*'?\s*$/i, "<<'PY'")
+    .replace(/\bhttps?:\/\/[^\s"']{80,}/g, (url) => `${url.slice(0, 77)}…`);
+
+  if (normalized.length <= MAX_TOOL_DETAIL_CHARS) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, MAX_TOOL_DETAIL_CHARS - 1)}…`;
 }
 
 function parseToolLine(
@@ -299,7 +315,7 @@ export function parseHermesStdoutLine(
         kind: "tool_call",
         ts,
         name: toolInfo.name,
-        input: { detail: toolInfo.detail },
+        input: { detail: compactToolDetail(toolInfo.detail) },
         toolUseId,
       },
     ];
@@ -316,9 +332,10 @@ export function parseHermesStdoutLine(
     const toolInfo = parseToolLine(trimmed, { parseDuration: true });
     if (toolInfo) {
       const toolUseId = takePendingToolCall(toolInfo.name, toolInfo.detail);
+      const compactDetail = compactToolDetail(toolInfo.detail);
       const detailText = toolInfo.duration
-        ? `${toolInfo.detail}  ${toolInfo.duration}`
-        : toolInfo.detail;
+        ? `${compactDetail}  ${toolInfo.duration}`
+        : compactDetail;
 
       if (toolUseId) {
         return [
@@ -338,7 +355,7 @@ export function parseHermesStdoutLine(
           kind: "tool_call",
           ts,
           name: toolInfo.name,
-          input: { detail: toolInfo.detail },
+          input: { detail: compactToolDetail(toolInfo.detail) },
           toolUseId: fallbackToolUseId,
         },
         {
