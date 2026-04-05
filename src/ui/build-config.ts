@@ -54,6 +54,10 @@ export function buildHermesConfig(
   // Session persistence (default: on)
   ac.persistSession = true;
 
+  // Keep Hermes in non-quiet mode by default so Paperclip receives incremental
+  // [tool], ┊ 💭, and ┊ 💬 lines and can render live progress states.
+  ac.quiet = false;
+
   // Working directory
   if (v.cwd) {
     ac.cwd = v.cwd;
