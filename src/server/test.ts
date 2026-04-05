@@ -139,7 +139,11 @@ function checkApiKeys(
   const envConfig = (config.env ?? {}) as Record<string, unknown>;
   const resolvedEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string" && value.length > 0) resolvedEnv[key] = value;
+    if (typeof value === "string" && value.length > 0) {
+      resolvedEnv[key] = value;
+    } else if (value && typeof value === "object" && typeof (value as any).value === "string") {
+      resolvedEnv[key] = (value as any).value;
+    }
   }
 
   const has = (key: string): boolean =>
