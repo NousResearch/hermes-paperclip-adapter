@@ -420,9 +420,15 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
+  const userEnv = config.env as Record<string, unknown> | undefined;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    for (const [key, val] of Object.entries(userEnv)) {
+      if (typeof val === "string") {
+        env[key] = val;
+      } else if (val && typeof val === "object" && typeof (val as any).value === "string") {
+        env[key] = (val as any).value;
+      }
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
