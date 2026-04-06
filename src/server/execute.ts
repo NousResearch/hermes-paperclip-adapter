@@ -31,6 +31,10 @@ import {
   ensureAbsoluteDirectory,
 } from "@paperclipai/adapter-utils/server-utils";
 
+import { execFile } from "child_process";
+import os from "os";
+import path from "path";
+
 import {
   HERMES_CLI,
   DEFAULT_TIMEOUT_SEC,
@@ -306,6 +310,84 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Hermes SQLite session database query
+// --------------------------------------------------------------------------
+
+/**
+ * Query the Hermes session database for cost and usage data after a session completes.
+ *
+ * Hermes stores all session metadata (including estimated/actual cost) in its SQLite
+ * state database (~/.hermes/state.db). In quiet mode (-q/-Q), Hermes does NOT emit
+ * cost/usage lines to stdout — the COST_REGEX and TOKEN_USAGE_REGEX in parseHermesOutput
+ * never match anything.
+ *
+ * This function reads directly from the DB after the session ends, giving us
+ * accurate cost and token usage data for Paperclip billing.
+ *
+ * @param sessionId  The Hermes session ID (e.g. "20260405_221750_373ca4")
+ * @returns Cost and usage data from the DB, or null if the DB is unavailable
+ */
+async function queryHermesDbForSession(
+  sessionId: string,
+): Promise<{ costUsd: number; usage: UsageSummary } | null> {
+  // Hermes stores state at ~/.hermes/state.db (or $HERMES_HOME/state.db)
+  const hermesHome = process.env.HERMES_HOME ?? path.join(os.homedir(), ".hermes");
+  const dbPath = path.join(hermesHome, "state.db");
+
+  return new Promise((resolve) => {
+    // Use sqlite3 CLI (available on macOS/Linux) for safe readonly query
+    execFile(
+      "sqlite3",
+      [
+        "-readonly", // safety: read-only mode
+        dbPath,
+        `SELECT actual_cost_usd, estimated_cost_usd, cost_status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM sessions WHERE id = '${sessionId}';`,
+      ],
+      { timeout: 5000 },
+      (error, stdout) => {
+        if (error || !stdout.trim()) {
+          resolve(null);
+          return;
+        }
+
+        const fields = stdout.trim().split("|");
+        if (fields.length < 8) {
+          resolve(null);
+          return;
+        }
+
+        const [actualCostStr, estimatedCostStr, costStatus, inputTokensStr, outputTokensStr, cacheReadStr, cacheWriteStr] = fields;
+
+        // Prefer actual_cost_usd when available; fall back to estimated
+        const actualCost = parseFloat(actualCostStr);
+        const estimatedCost = parseFloat(estimatedCostStr);
+        const costUsd = !isNaN(actualCost) ? actualCost : !isNaN(estimatedCost) ? estimatedCost : undefined;
+
+        // Build usage summary (matches @paperclipai/adapter-utils UsageSummary interface)
+        const inputTokens = parseInt(inputTokensStr, 10) || 0;
+        const outputTokens = parseInt(outputTokensStr, 10) || 0;
+        const cacheRead = parseInt(cacheReadStr, 10) || 0;
+        const cacheWrite = parseInt(cacheWriteStr, 10) || 0;
+
+        if (costUsd === undefined && inputTokens === 0 && outputTokens === 0) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          costUsd: costUsd ?? 0,
+          usage: {
+            inputTokens,
+            outputTokens,
+            cachedInputTokens: cacheRead + cacheWrite,
+          },
+        });
+      },
+    );
+  });
+}
+
+// --------------------------------------------------------------------------
 // Main execute
 // ---------------------------------------------------------------------------
 
@@ -487,6 +569,20 @@ export async function execute(
   );
   if (parsed.sessionId) {
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
+
+    // ── Query SQLite for cost + usage (quiet mode emits no cost lines) ──
+    // Hermes quiet mode (-q/-Q) only outputs: response text + "session_id: <id>"
+    // It does NOT emit cost/usage lines — that data is only in the SQLite DB.
+    const dbData = await queryHermesDbForSession(parsed.sessionId);
+    if (dbData) {
+      // DB data overrides whatever (nothing) was parsed from stdout
+      parsed.costUsd = dbData.costUsd;
+      parsed.usage = dbData.usage;
+      await ctx.onLog(
+        "stdout",
+        `[hermes] DB cost: $${dbData.costUsd.toFixed(4)} (tokens: in=${dbData.usage.inputTokens} out=${dbData.usage.outputTokens} cached=${dbData.usage.cachedInputTokens})\n`,
+      );
+    }
   }
 
   // ── Build result ───────────────────────────────────────────────────────
