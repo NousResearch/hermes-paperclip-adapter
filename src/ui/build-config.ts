@@ -17,6 +17,54 @@ import {
 } from "../shared/constants.js";
 
 /**
+ * Parse KEY=VALUE lines from a multiline string.
+ * Skips blank lines and lines starting with #.
+ */
+export function parseEnvVars(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1);
+    if (key) result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Parse env bindings that may carry {type:"plain",value} or
+ * {type:"secret_ref",secretId,version?} shapes.
+ */
+export function parseEnvBindings(bindings: unknown): Record<string, unknown> {
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
+    return {};
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, binding] of Object.entries(
+    bindings as Record<string, unknown>,
+  )) {
+    if (typeof binding === "string") {
+      result[key] = { type: "plain" as const, value: binding };
+      continue;
+    }
+    if (!binding || typeof binding !== "object") continue;
+    const b = binding as Record<string, unknown>;
+    if (b["type"] === "plain") {
+      result[key] = b["value"];
+    } else if (b["type"] === "secret_ref") {
+      result[key] = {
+        secretId: b["secretId"],
+        ...(b["version"] !== undefined ? { version: b["version"] } : {}),
+      };
+    }
+  }
+  return result;
+}
+
+/**
  * Build a Hermes Agent adapter config from the Paperclip UI form values.
  */
 export function buildHermesConfig(
@@ -66,7 +114,7 @@ export function buildHermesConfig(
 
   // Extra CLI arguments
   if (v.extraArgs) {
-    ac.extraArgs = v.extraArgs.split(/\s+/).filter(Boolean);
+    ac.extraArgs = v.extraArgs.split(",").map((s) => s.trim()).filter(Boolean);
   }
 
   // Thinking/reasoning effort
@@ -79,6 +127,56 @@ export function buildHermesConfig(
   // Prompt template
   if (v.promptTemplate) {
     ac.promptTemplate = v.promptTemplate;
+  }
+
+  // Instructions file path
+  if (v.instructionsFilePath) {
+    ac.instructionsFilePath = v.instructionsFilePath;
+  }
+
+  // Bootstrap prompt
+  if (v.bootstrapPrompt) {
+    ac.bootstrapPromptTemplate = v.bootstrapPrompt;
+  }
+
+  // Environment variables — bindings take priority over plain text vars
+  const envFromBindings = parseEnvBindings(v.envBindings);
+  const envFromVars = parseEnvVars(v.envVars ?? "");
+  const mergedEnv: Record<string, unknown> = {
+    ...envFromVars,
+    ...envFromBindings,
+  };
+  if (Object.keys(mergedEnv).length > 0) {
+    ac.env = mergedEnv;
+  }
+
+  // Provider override (from adapter-specific schema values).
+  // adapterSchemaValues is not yet part of the published CreateConfigValues
+  // type but may be present at runtime when the Paperclip host is newer.
+  const schemaValues = (v as unknown as Record<string, unknown>)[
+    "adapterSchemaValues"
+  ] as Record<string, unknown> | undefined;
+  const provider = schemaValues?.["provider"];
+  if (typeof provider === "string" && provider.trim()) {
+    ac.provider = provider.trim();
+  }
+
+  // Toolsets (from adapter-specific schema values)
+  const toolsets = schemaValues?.["toolsets"];
+  if (typeof toolsets === "string" && toolsets.trim()) {
+    ac.toolsets = toolsets.trim();
+  }
+
+  // Profile (from adapter-specific schema values)
+  // Persist profile name and inject -p flag so Hermes runs the right profile.
+  const profile = schemaValues?.["profile"];
+  if (typeof profile === "string" && profile.trim()) {
+    ac.profile = profile.trim();
+    const existing = (ac.extraArgs as string[]) || [];
+    if (!existing.includes("-p") && !existing.includes("--profile")) {
+      existing.push("-p", profile.trim());
+      ac.extraArgs = existing;
+    }
   }
 
   // Heartbeat config is handled by Paperclip itself
