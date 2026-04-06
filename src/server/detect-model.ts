@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { MODEL_PREFIX_PROVIDER_HINTS, VALID_PROVIDERS } from "../shared/constants.js";
+import { resolveHermesHomeDir } from "../shared/profile.js";
 
 export interface DetectedModel {
   /** Model name from config (e.g. "gpt-5.4", "anthropic/claude-sonnet-4") */
@@ -28,11 +29,23 @@ export interface DetectedModel {
 
 /**
  * Read the Hermes config file and extract the default model config.
+ *
+ * When adapterConfig is provided, resolves the profile-specific config path
+ * (e.g. ~/.hermes/profiles/sable/config.yaml) before falling back to the
+ * default ~/.hermes/config.yaml.
  */
 export async function detectModel(
   configPath?: string,
+  adapterConfig?: Record<string, unknown>,
 ): Promise<DetectedModel | null> {
-  const filePath = configPath ?? join(homedir(), ".hermes", "config.yaml");
+  let filePath: string;
+  if (configPath) {
+    filePath = configPath;
+  } else if (adapterConfig) {
+    filePath = join(resolveHermesHomeDir(adapterConfig), "config.yaml");
+  } else {
+    filePath = join(homedir(), ".hermes", "config.yaml");
+  }
 
   let content: string;
   try {

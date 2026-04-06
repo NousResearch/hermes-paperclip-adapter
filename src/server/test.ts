@@ -13,6 +13,7 @@ import type {
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import fs from "node:fs";
 
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
 import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
@@ -236,6 +237,99 @@ async function checkProviderConsistency(
   return null;
 }
 
+function checkCwd(
+  config: Record<string, unknown>,
+): AdapterEnvironmentCheck | null {
+  const cwd = asString(config.cwd);
+  if (!cwd) {
+    return {
+      level: "info",
+      message: "No CWD configured — Hermes will use the process working directory",
+      code: "hermes_cwd_default",
+    };
+  }
+  try {
+    const stat = fs.statSync(cwd);
+    if (!stat.isDirectory()) {
+      return {
+        level: "error",
+        message: `Configured CWD "${cwd}" exists but is not a directory`,
+        hint: "Set cwd to a valid directory path in the agent configuration",
+        code: "hermes_cwd_invalid",
+      };
+    }
+    return {
+      level: "info",
+      message: `CWD "${cwd}" exists and is a directory`,
+      code: "hermes_cwd_valid",
+    };
+  } catch {
+    return {
+      level: "error",
+      message: `Configured CWD "${cwd}" does not exist`,
+      hint: "Create the directory or update cwd in the agent configuration",
+      code: "hermes_cwd_invalid",
+    };
+  }
+}
+
+async function checkHelloProbe(
+  command: string,
+  config: Record<string, unknown>,
+): Promise<AdapterEnvironmentCheck> {
+  // Collect any -p/--profile args from extraArgs to pass along
+  const extraArgs = Array.isArray(config.extraArgs)
+    ? (config.extraArgs as unknown[]).filter((a): a is string => typeof a === "string")
+    : [];
+  const profileArgs: string[] = [];
+  for (let i = 0; i < extraArgs.length; i++) {
+    if (extraArgs[i] === "-p" || extraArgs[i] === "--profile") {
+      profileArgs.push(extraArgs[i]);
+      if (i + 1 < extraArgs.length) {
+        profileArgs.push(extraArgs[++i]);
+      }
+    } else if (extraArgs[i].startsWith("--profile=")) {
+      profileArgs.push(extraArgs[i]);
+    }
+  }
+
+  const args = ["chat", "-q", "Respond with hello.", "-Q", ...profileArgs];
+
+  try {
+    const { stdout } = await execFileAsync(command, args, { timeout: 45_000 });
+    const output = stdout.trim().toLowerCase();
+    if (output.includes("hello")) {
+      return {
+        level: "info",
+        message: "Live hello probe passed — Hermes responded correctly",
+        code: "hermes_hello_probe_passed",
+      };
+    }
+    return {
+      level: "warn",
+      message: `Live hello probe returned unexpected output: "${stdout.trim().slice(0, 120)}"`,
+      hint: "Hermes is reachable but the response did not contain 'hello'. Check model and provider configuration.",
+      code: "hermes_hello_probe_unexpected_output",
+    };
+  } catch (err: unknown) {
+    const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+    if (e.killed || e.signal === "SIGTERM" || (e.message && e.message.includes("timed out"))) {
+      return {
+        level: "warn",
+        message: "Live hello probe timed out after 45 seconds",
+        hint: "Hermes may be slow to respond or the network/API is unreachable",
+        code: "hermes_hello_probe_timed_out",
+      };
+    }
+    return {
+      level: "warn",
+      message: `Live hello probe failed: ${e.message ?? String(err)}`,
+      hint: "Check that Hermes Agent is correctly installed, API keys are set, and the model is accessible",
+      code: "hermes_hello_probe_failed",
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main test
 // ---------------------------------------------------------------------------
@@ -277,9 +371,17 @@ export async function testEnvironment(
   const apiKeyCheck = checkApiKeys(config);
   if (apiKeyCheck) checks.push(apiKeyCheck);
 
-  // 6. Provider/model consistency
+  // 6. CWD validation
+  const cwdCheck = checkCwd(config);
+  if (cwdCheck) checks.push(cwdCheck);
+
+  // 7. Provider/model consistency
   const providerCheck = await checkProviderConsistency(config);
   if (providerCheck) checks.push(providerCheck);
+
+  // 8. Live hello probe
+  const helloProbeCheck = await checkHelloProbe(command, config);
+  checks.push(helloProbeCheck);
 
   // Determine overall status
   const hasErrors = checks.some((c) => c.level === "error");
