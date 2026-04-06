@@ -202,8 +202,33 @@ const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
 
-/** Regex to extract cost from Hermes output. */
+/** Regex to extract cost from Hermes output (fallback — Hermes typically stores cost in state.db). */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
+
+/**
+ * Query the Hermes session SQLite database for the estimated cost of a session.
+ * This is the primary source of truth — Hermes stores cost there after each run,
+ * not in stdout/stderr.
+ */
+async function getSessionCostFromDb(sessionId: string): Promise<number | null> {
+  try {
+    // Hermes stores session data in ~/.hermes/state.db
+    const dbPath = `${process.env.HOME ?? process.env.USERPROFILE ?? "/Users/thoth"}/.hermes/state.db`;
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const row = db
+        .prepare("SELECT estimated_cost_usd FROM sessions WHERE id = ?")
+        .get(sessionId) as { estimated_cost_usd: number } | undefined;
+      return row?.estimated_cost_usd ?? null;
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Non-fatal — database may not exist or session may not yet be flushed
+    return null;
+  }
+}
 
 interface ParsedOutput {
   sessionId?: string;
@@ -506,8 +531,19 @@ export async function execute(
     executionResult.usage = parsed.usage;
   }
 
+  // Primary cost source: Hermes state.db (after session completes).
+  // The stdout regex is a fallback for any Hermes versions that do emit cost there.
   if (parsed.costUsd !== undefined) {
     executionResult.costUsd = parsed.costUsd;
+  } else if (parsed.sessionId) {
+    const dbCost = await getSessionCostFromDb(parsed.sessionId);
+    if (dbCost !== null) {
+      executionResult.costUsd = dbCost;
+      await ctx.onLog(
+        "stdout",
+        `[hermes] Cost from state.db: $${dbCost.toFixed(6)}\n`,
+      );
+    }
   }
 
   // Summary from agent response
