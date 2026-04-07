@@ -90,9 +90,9 @@ Title: {{taskTitle}}
 2. When done, mark the issue as completed:
    \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
 3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>","authorAgentId":"{{agentId}}"}'\`
 4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>","authorAgentId":"{{agentId}}"}'\`
 {{/taskId}}
 
 {{#commentId}}
@@ -440,7 +440,7 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
+  if ((ctx as any).authToken)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
