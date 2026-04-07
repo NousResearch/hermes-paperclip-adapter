@@ -17,8 +17,15 @@ export const DEFAULT_TIMEOUT_SEC = 1800;
 /** Grace period after SIGTERM before SIGKILL (seconds). */
 export const DEFAULT_GRACE_SEC = 10;
 
-/** Default model to use if none specified. */
-export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
+/**
+ * Default model to use if none specified.
+ *
+ * Use "auto" so that Hermes resolves the model from the user's local
+ * ~/.hermes/config.yaml — preventing the adapter from overriding a
+ * user's configured default (e.g. MiniMax, OpenRouter, etc.) with a
+ * hardcoded Anthropic model during Paperclip onboarding.
+ */
+export const DEFAULT_MODEL = "auto";
 
 /**
  * Valid --provider choices for the hermes CLI.
