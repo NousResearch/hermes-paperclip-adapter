@@ -18,6 +18,9 @@
  *   --source           session source tag for filtering
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -354,8 +357,36 @@ export async function execute(
     model,
   });
 
+  // ── Load agent instructions file (Paperclip instruction bundles) ──────
+  // Built-in adapters (claude_local, codex_local, gemini_local) read the
+  // instructionsFilePath from adapterConfig and inject it into the agent
+  // prompt. The hermes adapter was missing this — so curated instruction
+  // files (AGENTS.md, SOUL.md, HEARTBEAT.md, TOOLS.md) were never read.
+  const instructionsFilePath = cfgString(config.instructionsFilePath);
+  let agentInstructions = "";
+  if (instructionsFilePath) {
+    try {
+      agentInstructions = await fs.readFile(instructionsFilePath, "utf-8");
+      const instructionsFileDir = path.dirname(instructionsFilePath);
+      agentInstructions += `\nThe above agent instructions were loaded from ${instructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}/.`;
+      await ctx.onLog(
+        "stdout",
+        `[hermes] Loaded agent instructions from ${instructionsFilePath} (${agentInstructions.length} chars)\n`,
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await ctx.onLog(
+        "stderr",
+        `[hermes] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
+      );
+    }
+  }
+
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  let prompt = buildPrompt(ctx, config);
+  if (agentInstructions) {
+    prompt = agentInstructions + "\n\n---\n\n" + prompt;
+  }
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
