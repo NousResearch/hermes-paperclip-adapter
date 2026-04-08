@@ -367,16 +367,20 @@ export async function execute(
   if (instructionsFilePath) {
     try {
       agentInstructions = await fs.readFile(instructionsFilePath, "utf-8");
+      const loadedInstructionsLength = agentInstructions.length;
       const instructionsFileDir = path.dirname(instructionsFilePath);
       agentInstructions += `\nThe above agent instructions were loaded from ${instructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}/.`;
       await ctx.onLog(
         "stdout",
-        `[hermes] Loaded agent instructions from ${instructionsFilePath} (${agentInstructions.length} chars)\n`,
+        `[hermes] Loaded agent instructions from ${instructionsFilePath} (${loadedInstructionsLength} chars)\n`,
       );
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
+      // Non-fatal: log to stdout with an explicit "Warning:" prefix so the
+      // Paperclip UI doesn't render this as a red error (stderr output is
+      // surfaced as an error signal even when execution continues).
       await ctx.onLog(
-        "stderr",
+        "stdout",
         `[hermes] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
       );
     }
