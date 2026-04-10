@@ -12,6 +12,7 @@ import type {
 } from "@paperclipai/adapter-utils";
 
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
@@ -135,15 +136,38 @@ function checkApiKeys(
 ): AdapterEnvironmentCheck | null {
   // The server resolves secret refs into config.env before calling testEnvironment,
   // so we check config.env first (adapter-configured secrets), then fall back to
-  // process.env (server/host environment). This mirrors how the Claude adapter does it.
+  // process.env (server/host environment), then ~/.hermes/.env (Hermes local config).
   const envConfig = (config.env ?? {}) as Record<string, unknown>;
   const resolvedEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string" && value.length > 0) resolvedEnv[key] = value;
   }
 
+  // Also read ~/.hermes/.env — Hermes stores API keys there by default and does
+  // not export them to the parent process, so Paperclip's process.env won't
+  // contain them.  Parsing this file ensures the environment test reports
+  // accurate results for keys that Hermes already knows about.
+  const hermesEnvKeys: Record<string, string> = {};
+  try {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || "/root";
+    const hermesEnvPath = `${homeDir}/.hermes/.env`;
+    const content = readFileSync(hermesEnvPath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx > 0) {
+        const key = trimmed.substring(0, eqIdx).trim();
+        const value = trimmed.substring(eqIdx + 1).trim();
+        if (value.length > 0) hermesEnvKeys[key] = value;
+      }
+    }
+  } catch {
+    // ~/.hermes/.env may not exist — that's fine
+  }
+
   const has = (key: string): boolean =>
-    !!(resolvedEnv[key] ?? process.env[key]);
+    !!(resolvedEnv[key] ?? process.env[key] ?? hermesEnvKeys[key]);
 
   const hasAnthropic = has("ANTHROPIC_API_KEY");
   const hasOpenRouter = has("OPENROUTER_API_KEY");
