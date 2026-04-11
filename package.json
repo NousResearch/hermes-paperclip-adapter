@@ -31,6 +31,7 @@
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
+    "test:command-resolution": "npm run build && node --test dist/server/command-resolution.test.js",
     "clean": "rm -rf dist"
   },
   "dependencies": {
