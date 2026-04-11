@@ -29,6 +29,7 @@ import {
   buildPaperclipEnv,
   renderTemplate,
   ensureAbsoluteDirectory,
+  joinPromptSections,
 } from "@paperclipai/adapter-utils/server-utils";
 
 import {
@@ -43,6 +44,7 @@ import {
   detectModel,
   resolveProvider,
 } from "./detect-model.js";
+import { buildDesiredSkillPromptData } from "./skills.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -123,7 +125,7 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
-function buildPrompt(
+export function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
 ): string {
@@ -186,6 +188,17 @@ function buildPrompt(
 
   // Replace remaining {{variable}} placeholders
   return renderTemplate(rendered, vars);
+}
+
+export async function buildExecutionPrompt(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+): Promise<string> {
+  const skillPrompt = await buildDesiredSkillPromptData(config);
+  return joinPromptSections([
+    skillPrompt.promptSection,
+    buildPrompt(ctx, config),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +368,7 @@ export async function execute(
   });
 
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  const prompt = await buildExecutionPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line

@@ -39,6 +39,12 @@ interface SkillFrontmatter {
   metadata?: Record<string, unknown>;
 }
 
+export interface DesiredSkillPromptData {
+  desiredSkillNames: string[];
+  promptSection: string;
+  warnings: string[];
+}
+
 function parseSkillFrontmatter(content: string): SkillFrontmatter {
   const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!match) return {};
@@ -225,4 +231,46 @@ export function resolveHermesDesiredSkillNames(
   availableEntries: Array<{ key: string; required?: boolean }>,
 ): string[] {
   return resolvePaperclipDesiredSkillNames(config, availableEntries);
+}
+
+export async function buildDesiredSkillPromptData(
+  config: Record<string, unknown>,
+): Promise<DesiredSkillPromptData> {
+  const availableEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+  const desiredSkillNames = resolvePaperclipDesiredSkillNames(config, availableEntries);
+  const warnings: string[] = [];
+  const sections: string[] = [];
+
+  for (const skillName of desiredSkillNames) {
+    const entry = availableEntries.find((candidate) => candidate.key === skillName);
+    if (!entry) {
+      warnings.push(`Desired Paperclip skill "${skillName}" is not available at runtime.`);
+      continue;
+    }
+
+    try {
+      const markdown = await fs.readFile(path.join(entry.source, "SKILL.md"), "utf8");
+      sections.push(`## Skill: ${entry.runtimeName}\n\n${markdown.trim()}`);
+    } catch {
+      warnings.push(`Desired Paperclip skill "${skillName}" is missing source/SKILL.md.`);
+    }
+  }
+
+  if (sections.length === 0) {
+    return {
+      desiredSkillNames,
+      promptSection: "",
+      warnings,
+    };
+  }
+
+  return {
+    desiredSkillNames,
+    promptSection: [
+      "# Paperclip-managed runtime skills",
+      "Apply these company-managed skills before the normal wake/task instructions.",
+      ...sections,
+    ].join("\n\n"),
+    warnings,
+  };
 }
