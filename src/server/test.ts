@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
 import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
+import { resolveHermesCommand } from "./execute.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -244,7 +245,7 @@ export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const config = (ctx.config ?? {}) as Record<string, unknown>;
-  const command = asString(config.hermesCommand) || HERMES_CLI;
+  const command = resolveHermesCommand(config);
   const checks: AdapterEnvironmentCheck[] = [];
 
   // 1. CLI installed?
