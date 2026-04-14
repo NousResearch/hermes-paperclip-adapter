@@ -2,7 +2,7 @@
  * Detect the current model and provider from the user's Hermes config.
  *
  * Reads ~/.hermes/config.yaml and extracts the default model,
- * provider, base_url, and api_mode settings.
+ * provider, base_url, api_key presence, and api_mode settings.
  *
  * Also provides provider resolution logic that merges explicit config,
  * Hermes config detection, and model-name prefix inference.
@@ -20,6 +20,8 @@ export interface DetectedModel {
   provider: string;
   /** Base URL override from config (e.g. "https://api.githubcopilot.com"). May be empty. */
   baseUrl: string;
+  /** Whether Hermes config includes a non-empty API key. */
+  hasApiKey: boolean;
   /** API mode from config (e.g. "chat_completions", "codex_responses"). May be empty. */
   apiMode: string;
   /** Where the detection came from */
@@ -45,7 +47,7 @@ export async function detectModel(
 }
 
 /**
- * Parse model.default, model.provider, model.base_url, and model.api_mode
+ * Parse model.default, model.provider, model.base_url, model.api_key, and model.api_mode
  * from raw YAML content. Uses simple regex parsing to avoid a YAML dependency.
  */
 export function parseModelFromConfig(content: string): DetectedModel | null {
@@ -53,6 +55,7 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
   let model = "";
   let provider = "";
   let baseUrl = "";
+  let hasApiKey = false;
   let apiMode = "";
   let inModelSection = false;
   let modelSectionIndent = 0;
@@ -81,6 +84,7 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
         if (key === "default") model = val;
         if (key === "provider") provider = val;
         if (key === "base_url") baseUrl = val;
+        if (key === "api_key") hasApiKey = val.length > 0;
         if (key === "api_mode") apiMode = val;
       }
     }
@@ -88,7 +92,7 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
 
   if (!model) return null;
 
-  return { model, provider, baseUrl, apiMode, source: "config" };
+  return { model, provider, baseUrl, hasApiKey, apiMode, source: "config" };
 }
 
 /**
@@ -122,8 +126,10 @@ export function inferProviderFromModel(model: string): string | undefined {
  *   1. Explicit provider from adapterConfig (highest priority — user override)
  *   2. Provider from Hermes config file — ONLY if the config model matches
  *      the requested model (otherwise the config provider is for a different model)
- *   3. Provider inferred from model name prefix
- *   4. "auto" (let Hermes figure it out — lowest priority)
+ *   3. If Hermes config matches the requested model but uses runtime settings that
+ *      the adapter cannot represent directly, return "auto" and let Hermes resolve it itself
+ *   4. Provider inferred from model name prefix
+ *   5. "auto" (let Hermes figure it out — lowest priority)
  *
  * Always returns a valid provider string.
  * The `resolvedFrom` field indicates which source was used, useful for logging.
@@ -135,30 +141,70 @@ export function resolveProvider(options: {
   detectedProvider?: string;
   /** Model name from Hermes config file (to check consistency) */
   detectedModel?: string;
+  /** Base URL detected from Hermes config file */
+  detectedBaseUrl?: string;
+  /** Whether Hermes config includes a non-empty API key */
+  detectedHasApiKey?: boolean;
+  /** API mode detected from Hermes config file */
+  detectedApiMode?: string;
   /** Model name to infer from if no explicit/detected provider */
   model?: string;
 }): { provider: string; resolvedFrom: string } {
-  const { explicitProvider, detectedProvider, detectedModel, model } = options;
+  const {
+    explicitProvider,
+    detectedProvider,
+    detectedModel,
+    detectedBaseUrl,
+    detectedHasApiKey,
+    detectedApiMode,
+    model,
+  } = options;
 
   // 1. Explicit provider from adapterConfig — user override, always wins
   if (explicitProvider && (VALID_PROVIDERS as readonly string[]).includes(explicitProvider)) {
     return { provider: explicitProvider, resolvedFrom: "adapterConfig" };
   }
 
+  const supportedProviders = VALID_PROVIDERS as readonly string[];
+  const configMatchesRequestedModel =
+    !!detectedModel &&
+    !!model &&
+    detectedModel.toLowerCase() === model.toLowerCase();
+
   // 2. Provider from Hermes config file — but ONLY if the config model matches
   //    the requested model. Otherwise the config provider is for a different model
   //    and would cause exactly the kind of routing bug we're fixing.
   if (
-    detectedProvider &&
-    detectedModel &&
-    (VALID_PROVIDERS as readonly string[]).includes(detectedProvider) &&
-    // Config model matches requested model (exact or case-insensitive)
-    detectedModel.toLowerCase() === model?.toLowerCase()
+    configMatchesRequestedModel &&
+    !!detectedProvider &&
+    supportedProviders.includes(detectedProvider)
   ) {
     return { provider: detectedProvider, resolvedFrom: "hermesConfig" };
   }
 
-  // 3. Infer from model name prefix
+  const hasRuntimeSignals = !!detectedBaseUrl || !!detectedHasApiKey || !!detectedApiMode;
+
+  // 3a. Matching Hermes config with an unsupported provider (for example "custom")
+  //     should not fall through to model-name inference, because that can route to
+  //     the wrong provider entirely. Defer back to Hermes's own runtime resolution.
+  if (configMatchesRequestedModel && !!detectedProvider && !supportedProviders.includes(detectedProvider)) {
+    return {
+      provider: "auto",
+      resolvedFrom: `hermesConfigUnsupported:${detectedProvider}`,
+    };
+  }
+
+  // 3b. Matching Hermes config may omit provider entirely while still specifying
+  //     enough runtime information (base_url, api_key, api_mode) for Hermes itself.
+  //     In that case, also defer to Hermes instead of doing a wrong prefix inference.
+  if (configMatchesRequestedModel && !detectedProvider && hasRuntimeSignals) {
+    return {
+      provider: "auto",
+      resolvedFrom: "hermesConfigRuntime",
+    };
+  }
+
+  // 4. Infer from model name prefix
   if (model) {
     const inferred = inferProviderFromModel(model);
     if (inferred) {
@@ -166,6 +212,6 @@ export function resolveProvider(options: {
     }
   }
 
-  // 4. Let Hermes auto-detect
+  // 5. Let Hermes auto-detect
   return { provider: "auto", resolvedFrom: "auto" };
 }
