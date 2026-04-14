@@ -18,7 +18,7 @@ export const DEFAULT_TIMEOUT_SEC = 1800;
 export const DEFAULT_GRACE_SEC = 10;
 
 /** Default model to use if none specified. */
-export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
+export const DEFAULT_MODEL = "";
 
 /**
  * Valid --provider choices for the hermes CLI.
