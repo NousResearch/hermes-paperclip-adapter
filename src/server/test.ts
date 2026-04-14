@@ -130,9 +130,9 @@ function checkModel(
   };
 }
 
-function checkApiKeys(
+async function checkApiKeys(
   config: Record<string, unknown>,
-): AdapterEnvironmentCheck | null {
+): Promise<AdapterEnvironmentCheck | null> {
   // The server resolves secret refs into config.env before calling testEnvironment,
   // so we check config.env first (adapter-configured secrets), then fall back to
   // process.env (server/host environment). This mirrors how the Claude adapter does it.
@@ -152,15 +152,6 @@ function checkApiKeys(
   const hasKimi = has("KIMI_API_KEY");
   const hasMiniMax = has("MINIMAX_API_KEY");
 
-  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI && !hasZai && !hasKimi && !hasMiniMax) {
-    return {
-      level: "warn",
-      message: "No LLM API keys found in environment",
-      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
-      code: "hermes_no_api_keys",
-    };
-  }
-
   const providers: string[] = [];
   if (hasAnthropic) providers.push("Anthropic");
   if (hasOpenRouter) providers.push("OpenRouter");
@@ -169,10 +160,56 @@ function checkApiKeys(
   if (hasKimi) providers.push("Kimi");
   if (hasMiniMax) providers.push("MiniMax");
 
+  if (providers.length > 0) {
+    return {
+      level: "info",
+      message: `API keys found: ${providers.join(", ")}`,
+      code: "hermes_api_keys_found",
+    };
+  }
+
+  const requestedModel = asString(config.model);
+
+  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  try {
+    detectedConfig = await detectModel();
+  } catch {
+    // Non-fatal
+  }
+
+  const supportedProviders = VALID_PROVIDERS as readonly string[];
+  const modelMatchesRequested =
+    !!detectedConfig?.model &&
+    (!requestedModel || detectedConfig.model.toLowerCase() === requestedModel.toLowerCase());
+
+  const matchingHermesConfigApiKey =
+    !!detectedConfig?.hasApiKey &&
+    modelMatchesRequested;
+
+  if (matchingHermesConfigApiKey && detectedConfig) {
+    const providerLabel = detectedConfig.provider || "auto";
+    if (!supportedProviders.includes(providerLabel)) {
+      return {
+        level: "info",
+        message: `Hermes config includes runtime settings for unsupported adapter provider "${providerLabel}" via ~/.hermes/config.yaml`,
+        hint: "Skipping the built-in API-key warning because Hermes can resolve this provider at runtime.",
+        code: "hermes_custom_provider_config",
+      };
+    }
+
+    return {
+      level: "info",
+      message: `Hermes config includes an API key for provider "${providerLabel}" via ~/.hermes/config.yaml`,
+      hint: "Skipping the built-in API-key warning because Hermes can use model.api_key from the local Hermes config.",
+      code: "hermes_api_key_in_config",
+    };
+  }
+
   return {
-    level: "info",
-    message: `API keys found: ${providers.join(", ")}`,
-    code: "hermes_api_keys_found",
+    level: "warn",
+    message: "No LLM API keys found in environment",
+    hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
+    code: "hermes_no_api_keys",
   };
 }
 
@@ -200,6 +237,9 @@ async function checkProviderConsistency(
     explicitProvider,
     detectedProvider: detectedConfig?.provider,
     detectedModel: detectedConfig?.model,
+    detectedBaseUrl: detectedConfig?.baseUrl,
+    detectedHasApiKey: detectedConfig?.hasApiKey,
+    detectedApiMode: detectedConfig?.apiMode,
     model,
   });
 
@@ -211,6 +251,29 @@ async function checkProviderConsistency(
       message: `Provider mismatch: adapterConfig has "${explicitProvider}" but ~/.hermes/config.yaml has "${detectedConfig.provider}". Using adapterConfig value.`,
       hint: `Model "${model}" may not work correctly with provider "${explicitProvider}". Consider aligning with your Hermes config or removing the explicit provider to use auto-detection.`,
       code: "hermes_provider_mismatch",
+    };
+  }
+
+  // If Hermes config matches the requested model but uses an adapter-unsupported
+  // provider such as "custom", do not report a false provider inference.
+  if (!explicitProvider && resolvedFrom.startsWith("hermesConfigUnsupported:")) {
+    const unsupportedProvider = resolvedFrom.split(":", 2)[1] || detectedConfig?.provider || "unknown";
+    return {
+      level: "info",
+      message: `Hermes config uses unsupported adapter provider "${unsupportedProvider}" for model "${model}" — deferring to Hermes auto-detection`,
+      hint: "Paperclip will avoid model-name provider inference here and let Hermes resolve the provider from ~/.hermes/config.yaml at runtime.",
+      code: "hermes_provider_unsupported",
+    };
+  }
+
+  // If matching Hermes config provides runtime signals without an explicit provider,
+  // also defer to Hermes rather than inventing a provider from the model name.
+  if (!explicitProvider && resolvedFrom === "hermesConfigRuntime") {
+    return {
+      level: "info",
+      message: `Hermes config provides runtime settings for model "${model}" without an explicit adapter provider — deferring to Hermes auto-detection`,
+      hint: "Paperclip will avoid model-name provider inference here and let Hermes resolve the provider from ~/.hermes/config.yaml at runtime.",
+      code: "hermes_provider_runtime_config",
     };
   }
 
@@ -274,7 +337,7 @@ export async function testEnvironment(
   if (modelCheck) checks.push(modelCheck);
 
   // 5. API keys (check config.env — server resolves secrets before calling us)
-  const apiKeyCheck = checkApiKeys(config);
+  const apiKeyCheck = await checkApiKeys(config);
   if (apiKeyCheck) checks.push(apiKeyCheck);
 
   // 6. Provider/model consistency
