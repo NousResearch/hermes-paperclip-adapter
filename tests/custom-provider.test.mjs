@@ -73,19 +73,29 @@ async function withHermesHomeConfig(configLines, fn) {
   const tempHome = await mkdtemp(join(tmpdir(), 'hermes-paperclip-adapter-'));
   const hermesDir = join(tempHome, '.hermes');
   const configPath = join(hermesDir, 'config.yaml');
-  const previousHome = process.env.HOME;
+  const previousEnv = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    HOMEDRIVE: process.env.HOMEDRIVE,
+    HOMEPATH: process.env.HOMEPATH,
+  };
 
   await mkdir(hermesDir, { recursive: true });
   await writeFile(configPath, `${configLines.join('\n')}\n`, 'utf8');
   process.env.HOME = tempHome;
+  process.env.USERPROFILE = tempHome;
+  delete process.env.HOMEDRIVE;
+  delete process.env.HOMEPATH;
 
   try {
     return await fn();
   } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
     }
     await rm(tempHome, { recursive: true, force: true });
   }
@@ -109,6 +119,27 @@ test('testEnvironment does not warn about missing API keys when Hermes config pr
 
     assert.equal(codes.includes('hermes_no_api_keys'), false, JSON.stringify(result.checks, null, 2));
     assert.equal(result.status, 'pass', JSON.stringify(result.checks, null, 2));
+  });
+});
+
+test('testEnvironment describes provider-omitted runtime config without inventing provider "auto"', async () => {
+  await withHermesHomeConfig([
+    'model:',
+    '  default: oca/gpt-5.4',
+    '  base_url: https://example.invalid/litellm',
+    '  api_key: test-secret',
+  ], async () => {
+    const result = await testEnvironment({
+      config: {
+        hermesCommand: 'python3',
+        model: 'oca/gpt-5.4',
+      },
+    });
+
+    const apiKeyCheck = result.checks.find((check) => check.code === 'hermes_api_key_in_config');
+    assert.ok(apiKeyCheck, JSON.stringify(result.checks, null, 2));
+    assert.match(apiKeyCheck.message, /without an explicit provider/i);
+    assert.doesNotMatch(apiKeyCheck.message, /provider "auto"/i);
   });
 });
 

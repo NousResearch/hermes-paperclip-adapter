@@ -132,6 +132,7 @@ function checkModel(
 
 async function checkApiKeys(
   config: Record<string, unknown>,
+  detectedConfig: Awaited<ReturnType<typeof detectModel>> | null,
 ): Promise<AdapterEnvironmentCheck | null> {
   // The server resolves secret refs into config.env before calling testEnvironment,
   // so we check config.env first (adapter-configured secrets), then fall back to
@@ -170,13 +171,6 @@ async function checkApiKeys(
 
   const requestedModel = asString(config.model);
 
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  try {
-    detectedConfig = await detectModel();
-  } catch {
-    // Non-fatal
-  }
-
   const supportedProviders = VALID_PROVIDERS as readonly string[];
   const modelMatchesRequested =
     !!detectedConfig?.model &&
@@ -187,7 +181,17 @@ async function checkApiKeys(
     modelMatchesRequested;
 
   if (matchingHermesConfigApiKey && detectedConfig) {
-    const providerLabel = detectedConfig.provider || "auto";
+    const providerLabel = detectedConfig.provider.trim();
+
+    if (!providerLabel) {
+      return {
+        level: "info",
+        message: "Hermes config includes an API key for the requested model via ~/.hermes/config.yaml without an explicit provider",
+        hint: "Skipping the built-in API-key warning because Hermes can use model.api_key from the local Hermes config.",
+        code: "hermes_api_key_in_config",
+      };
+    }
+
     if (!supportedProviders.includes(providerLabel)) {
       return {
         level: "info",
@@ -219,19 +223,12 @@ async function checkApiKeys(
  */
 async function checkProviderConsistency(
   config: Record<string, unknown>,
+  detectedConfig: Awaited<ReturnType<typeof detectModel>> | null,
 ): Promise<AdapterEnvironmentCheck | null> {
   const model = asString(config.model);
   if (!model) return null;
 
   const explicitProvider = asString(config.provider);
-
-  // Try to detect from Hermes config
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  try {
-    detectedConfig = await detectModel();
-  } catch {
-    // Non-fatal
-  }
 
   const { provider: resolved, resolvedFrom } = resolveProvider({
     explicitProvider,
@@ -336,12 +333,20 @@ export async function testEnvironment(
   const modelCheck = checkModel(config);
   if (modelCheck) checks.push(modelCheck);
 
-  // 5. API keys (check config.env — server resolves secrets before calling us)
-  const apiKeyCheck = await checkApiKeys(config);
+  // 5. Detect Hermes config once for the remaining checks.
+  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  try {
+    detectedConfig = await detectModel();
+  } catch {
+    // Non-fatal
+  }
+
+  // 6. API keys (check config.env — server resolves secrets before calling us)
+  const apiKeyCheck = await checkApiKeys(config, detectedConfig);
   if (apiKeyCheck) checks.push(apiKeyCheck);
 
-  // 6. Provider/model consistency
-  const providerCheck = await checkProviderConsistency(config);
+  // 7. Provider/model consistency
+  const providerCheck = await checkProviderConsistency(config, detectedConfig);
   if (providerCheck) checks.push(providerCheck);
 
   // Determine overall status
