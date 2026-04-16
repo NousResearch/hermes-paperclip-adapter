@@ -81,12 +81,38 @@ async function checkCliVersion(
   }
 }
 
-async function checkPython(): Promise<AdapterEnvironmentCheck | null> {
+async function checkPython(command: string): Promise<AdapterEnvironmentCheck | null> {
+  // Prefer the Python version reported by the Hermes CLI itself, since Hermes may
+  // run from a virtualenv even when the system `python3` is older.
   try {
-    const { stdout } = await execFileAsync("python3", ["--version"], {
+    const { stdout, stderr } = await execFileAsync(command, ["--version"], {
+      timeout: 10_000,
+    });
+    const combined = `${stdout}\n${stderr}`;
+    const hermesPythonMatch = combined.match(/Python:\s*(\d+)\.(\d+)(?:\.(\d+))?/i);
+    if (hermesPythonMatch) {
+      const major = parseInt(hermesPythonMatch[1], 10);
+      const minor = parseInt(hermesPythonMatch[2], 10);
+      if (major < 3 || (major === 3 && minor < 10)) {
+        return {
+          level: "error",
+          message: `Hermes runtime Python ${major}.${minor} found — Hermes requires Python 3.10+`,
+          hint: "Upgrade the Python environment used by the hermes CLI to 3.10 or later",
+          code: "hermes_python_old",
+        };
+      }
+      return null;
+    }
+  } catch {
+    // Non-fatal here; CLI install/version is checked separately.
+  }
+
+  // Fallback: inspect python3 from PATH when Hermes doesn't report its runtime.
+  try {
+    const { stdout, stderr } = await execFileAsync("python3", ["--version"], {
       timeout: 5_000,
     });
-    const version = stdout.trim();
+    const version = `${stdout || stderr}`.trim();
     const match = version.match(/(\d+)\.(\d+)/);
     if (match) {
       const major = parseInt(match[1], 10);
@@ -266,7 +292,7 @@ export async function testEnvironment(
   if (versionCheck) checks.push(versionCheck);
 
   // 3. Python available?
-  const pythonCheck = await checkPython();
+  const pythonCheck = await checkPython(command);
   if (pythonCheck) checks.push(pythonCheck);
 
   // 4. Model config
