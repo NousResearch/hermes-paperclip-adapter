@@ -2,7 +2,7 @@
  * Server-side adapter module exports.
  */
 
-export { execute } from "./execute.js";
+export { execute, executeWithDeps } from "./execute.js";
 export { testEnvironment } from "./test.js";
 export { detectModel, parseModelFromConfig, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 export {

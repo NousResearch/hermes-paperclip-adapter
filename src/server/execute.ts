@@ -29,6 +29,7 @@ import {
   buildPaperclipEnv,
   renderTemplate,
   ensureAbsoluteDirectory,
+  type RunProcessResult,
 } from "@paperclipai/adapter-utils/server-utils";
 
 import {
@@ -309,9 +310,99 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
 // Main execute
 // ---------------------------------------------------------------------------
 
-export async function execute(
+type RunChildProcessImpl = typeof runChildProcess;
+
+interface ExecuteDeps {
+  runChildProcessImpl?: RunChildProcessImpl;
+}
+
+interface HermesAttempt {
+  resumeSessionId?: string;
+  proc: RunProcessResult;
+  parsed: ParsedOutput;
+}
+
+function isRetryableResumeFailure(attempt: HermesAttempt): boolean {
+  if (!attempt.resumeSessionId || attempt.proc.timedOut) {
+    return false;
+  }
+
+  if ((attempt.proc.exitCode ?? 0) === 0) {
+    return false;
+  }
+
+  const combined = `${attempt.proc.stdout}\n${attempt.proc.stderr}`;
+  return [
+    /Aborted\(\)\. Build with -sASSERTIONS for more info\./i,
+    /failed to resume/i,
+    /unknown session/i,
+    /no such session/i,
+    /session.+(?:not found|missing|does not exist|unavailable)/i,
+  ].some((pattern) => pattern.test(combined));
+}
+
+function buildExecutionResult(options: {
+  attempt: HermesAttempt;
+  provider: string;
+  model: string;
+  persistSession: boolean;
+  clearSession?: boolean;
+}): AdapterExecutionResult {
+  const { attempt, provider, model, persistSession, clearSession = false } = options;
+  const { proc, parsed } = attempt;
+
+  const executionResult: AdapterExecutionResult = {
+    exitCode: proc.exitCode,
+    signal: proc.signal,
+    timedOut: proc.timedOut,
+    provider,
+    model,
+  };
+
+  if (parsed.errorMessage) {
+    executionResult.errorMessage = parsed.errorMessage;
+  }
+
+  if (parsed.usage) {
+    executionResult.usage = parsed.usage;
+  }
+
+  if (parsed.costUsd !== undefined) {
+    executionResult.costUsd = parsed.costUsd;
+  }
+
+  if (parsed.response) {
+    executionResult.summary = parsed.response.slice(0, 2000);
+  }
+
+  executionResult.resultJson = {
+    result: parsed.response || "",
+    session_id: parsed.sessionId || null,
+    usage: parsed.usage || null,
+    cost_usd: parsed.costUsd ?? null,
+  };
+
+  // Store session ID for next run only after a clean exit.
+  // Hermes can emit a session_id even on crashes/abort() paths; persisting
+  // those broken session IDs causes the next wake to resume the same bad
+  // session and fail again.
+  if (persistSession && parsed.sessionId && proc.exitCode === 0 && !proc.timedOut) {
+    executionResult.sessionParams = { sessionId: parsed.sessionId };
+    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  }
+
+  if (clearSession && !executionResult.sessionParams) {
+    executionResult.clearSession = true;
+  }
+
+  return executionResult;
+}
+
+export async function executeWithDeps(
   ctx: AdapterExecutionContext,
+  deps: ExecuteDeps = {},
 ): Promise<AdapterExecutionResult> {
+  const runChildProcessImpl = deps.runChildProcessImpl ?? runChildProcess;
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
 
   // ── Resolve configuration ──────────────────────────────────────────────
@@ -327,15 +418,6 @@ export async function execute(
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
-  // Priority chain:
-  //   1. Explicit provider in adapterConfig (user override)
-  //   2. Provider from ~/.hermes/config.yaml (detected at runtime)
-  //   3. Provider inferred from model name prefix
-  //   4. "auto" (let Hermes decide)
-  //
-  // This ensures that even if the agent was created before provider tracking
-  // was added, or if the model was changed without updating provider, the
-  // correct provider is still used.
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
 
@@ -358,54 +440,38 @@ export async function execute(
   const prompt = buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
-  // Use -Q (quiet) to get clean output: just response + session_id line
-  const useQuiet = cfgBoolean(config.quiet) !== false; // default true
-  const args: string[] = ["chat", "-q", prompt];
-  if (useQuiet) args.push("-Q");
+  const useQuiet = cfgBoolean(config.quiet) !== false;
+  const baseArgs: string[] = ["chat", "-q", prompt];
+  if (useQuiet) baseArgs.push("-Q");
 
   if (model) {
-    args.push("-m", model);
+    baseArgs.push("-m", model);
   }
 
-  // Always pass --provider when we have a resolved one (not "auto").
-  // "auto" means Hermes will decide on its own — no need to pass it.
   if (resolvedProvider !== "auto") {
-    args.push("--provider", resolvedProvider);
+    baseArgs.push("--provider", resolvedProvider);
   }
 
   if (toolsets) {
-    args.push("-t", toolsets);
+    baseArgs.push("-t", toolsets);
   }
 
   if (maxTurns && maxTurns > 0) {
-    args.push("--max-turns", String(maxTurns));
+    baseArgs.push("--max-turns", String(maxTurns));
   }
 
-  if (worktreeMode) args.push("-w");
-  if (checkpoints) args.push("--checkpoints");
-  if (cfgBoolean(config.verbose) === true) args.push("-v");
+  if (worktreeMode) baseArgs.push("-w");
+  if (checkpoints) baseArgs.push("--checkpoints");
+  if (cfgBoolean(config.verbose) === true) baseArgs.push("-v");
 
   // Tag sessions as "tool" source so they don't clutter the user's session history.
-  // Requires hermes-agent >= PR #3255 (feat/session-source-tag).
-  args.push("--source", "tool");
+  baseArgs.push("--source", "tool");
 
-  // Bypass Hermes dangerous-command approval prompts.
-  // Paperclip agents run as non-interactive subprocesses with no TTY,
-  // so approval prompts would always timeout and deny legitimate commands
-  // (curl, python3 -c, etc.). Agents operate in a sandbox — the approval
-  // system is designed for human-attended interactive sessions.
-  args.push("--yolo");
-
-  // Session resume
-  const prevSessionId = cfgString(
-    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
-  );
-  if (persistSession && prevSessionId) {
-    args.push("--resume", prevSessionId);
-  }
+  // Bypass Hermes dangerous-command approval prompts for non-interactive runs.
+  baseArgs.push("--yolo");
 
   if (extraArgs?.length) {
-    args.push(...extraArgs);
+    baseArgs.push(...extraArgs);
   }
 
   // ── Build environment ──────────────────────────────────────────────────
@@ -415,8 +481,9 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
+  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY) {
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
+  }
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
@@ -434,31 +501,24 @@ export async function execute(
     // Non-fatal
   }
 
+  const prevSessionId = cfgString(
+    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
+  );
+
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
     `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
-  if (prevSessionId) {
-    await ctx.onLog(
-      "stdout",
-      `[hermes] Resuming session: ${prevSessionId}\n`,
-    );
-  }
 
-  // ── Execute ────────────────────────────────────────────────────────────
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
   // Paperclip renders all stderr as red/error in the UI.
-  // Wrap onLog to reclassify benign stderr lines as stdout.
   const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
     if (stream === "stderr") {
       const trimmed = chunk.trimEnd();
-      // Benign patterns that should NOT appear as errors:
-      // - Structured log lines: [timestamp] INFO/DEBUG/WARN: ...
-      // - MCP server registration messages
-      // - Python import/site noise
-      const isBenign = /^\[?\d{4}[-/]\d{2}[-/]\d{2}T/.test(trimmed) || // structured timestamps
-        /^[A-Z]+:\s+(INFO|DEBUG|WARN|WARNING)\b/.test(trimmed) || // log levels
+      const isBenign =
+        /^\[?\d{4}[-/]\d{2}[-/]\d{2}T/.test(trimmed) ||
+        /^[A-Z]+:\s+(INFO|DEBUG|WARN|WARNING)\b/.test(trimmed) ||
         /Successfully registered all tools/.test(trimmed) ||
         /MCP [Ss]erver/.test(trimmed) ||
         /tool registered successfully/.test(trimmed) ||
@@ -470,64 +530,64 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
-    cwd,
-    env,
-    timeoutSec,
-    graceSec,
-    onLog: wrappedOnLog,
-  });
+  const runAttempt = async (resumeSessionId?: string): Promise<HermesAttempt> => {
+    const args = [...baseArgs];
+    if (persistSession && resumeSessionId) {
+      args.push("--resume", resumeSessionId);
+      await ctx.onLog(
+        "stdout",
+        `[hermes] Resuming session: ${resumeSessionId}\n`,
+      );
+    }
 
-  // ── Parse output ───────────────────────────────────────────────────────
-  const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+    const proc = await runChildProcessImpl(ctx.runId, hermesCmd, args, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+    });
 
-  await ctx.onLog(
-    "stdout",
-    `[hermes] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`,
-  );
-  if (parsed.sessionId) {
-    await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
+    const parsed = parseHermesOutput(proc.stdout || "", proc.stderr || "");
+
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Exit code: ${proc.exitCode ?? "null"}, timed out: ${proc.timedOut}\n`,
+    );
+    if (parsed.sessionId) {
+      await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
+    }
+
+    return { resumeSessionId, proc, parsed };
+  };
+
+  const initial = await runAttempt(prevSessionId);
+
+  if (isRetryableResumeFailure(initial)) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Resume failed for session ${prevSessionId}; retrying once with a fresh session.\n`,
+    );
+    const retry = await runAttempt();
+    return buildExecutionResult({
+      attempt: retry,
+      provider: resolvedProvider,
+      model,
+      persistSession,
+      clearSession: true,
+    });
   }
 
-  // ── Build result ───────────────────────────────────────────────────────
-  const executionResult: AdapterExecutionResult = {
-    exitCode: result.exitCode,
-    signal: result.signal,
-    timedOut: result.timedOut,
+  return buildExecutionResult({
+    attempt: initial,
     provider: resolvedProvider,
     model,
-  };
+    persistSession,
+  });
+}
 
-  if (parsed.errorMessage) {
-    executionResult.errorMessage = parsed.errorMessage;
-  }
-
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
-  }
-
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
-  }
-
-  // Summary from agent response
-  if (parsed.response) {
-    executionResult.summary = parsed.response.slice(0, 2000);
-  }
-
-  // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
-  executionResult.resultJson = {
-    result: parsed.response || "",
-    session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
-  };
-
-  // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
-  }
-
-  return executionResult;
+export async function execute(
+  ctx: AdapterExecutionContext,
+): Promise<AdapterExecutionResult> {
+  return executeWithDeps(ctx);
 }
