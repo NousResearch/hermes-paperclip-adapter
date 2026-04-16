@@ -82,7 +82,10 @@ export async function listModels(): Promise<{ id: string; label: string }[]> {
   for (const block of cpSection.split(/(?=^\s+-\s)/m).filter(Boolean)) {
     const url = (block.match(/base_url:\s*(\S+)/) ?? block.match(/url:\s*(\S+)/))?.[1]?.trim();
     const key = block.match(/api_key:\s*(\S+)/)?.[1]?.trim() ?? "";
-    if (url && !endpoints.has(url)) endpoints.set(url, key);
+    if (url) {
+      // Add URL, or upgrade an existing keyless entry with a key we now have
+      if (!endpoints.has(url) || (!endpoints.get(url) && key)) endpoints.set(url, key);
+    }
   }
 
   // providers: map of name -> {api, api_key, default_model}
@@ -92,7 +95,7 @@ export async function listModels(): Promise<{ id: string; label: string }[]> {
   for (let i = 0; i < apiMatches.length; i++) {
     const url = apiMatches[i]?.[1]?.trim();
     const key = keyMatches[i]?.[1]?.trim() ?? "";
-    if (url && !endpoints.has(url)) endpoints.set(url, key);
+    if (url && (!endpoints.has(url) || (!endpoints.get(url) && key))) endpoints.set(url, key);
   }
 
   if (endpoints.size === 0) return [];
