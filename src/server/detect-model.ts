@@ -32,7 +32,7 @@ export interface DetectedModel {
 export async function detectModel(
   configPath?: string,
 ): Promise<DetectedModel | null> {
-  const filePath = configPath ?? join(homedir(), ".hermes", "config.yaml");
+  const filePath = configPath ?? join(process.env["HERMES_HOME"] ?? join(homedir(), ".hermes"), "config.yaml");
 
   let content: string;
   try {
