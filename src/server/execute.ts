@@ -325,6 +325,10 @@ export async function execute(
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
+  // Yolo mode (bypass approval prompts) defaults to true — see comment
+  // above args.push("--yolo") below for the rationale. Operators can
+  // opt out by setting adapterConfig.yolo = false.
+  const yolo = cfgBoolean(config.yolo) !== false;
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
@@ -394,7 +398,8 @@ export async function execute(
   // so approval prompts would always timeout and deny legitimate commands
   // (curl, python3 -c, etc.). Agents operate in a sandbox — the approval
   // system is designed for human-attended interactive sessions.
-  args.push("--yolo");
+  // Defaults to true; operators can opt out with adapterConfig.yolo = false.
+  if (yolo) args.push("--yolo");
 
   // Session resume
   const prevSessionId = cfgString(
