@@ -218,6 +218,10 @@ export function parseHermesStdoutLine(
 
   // ── Quiet-mode tool/message lines (prefixed with ┊) ────────────────────
   if (trimmed.includes(TOOL_OUTPUT_PREFIX)) {
+    // Skip tool generation start lines (e.g., "preparing terminal...")
+    if (trimmed.includes("preparing")) {
+      return [];
+    }
     // Assistant message: ┊ 💬 {text}
     if (isAssistantToolLine(trimmed)) {
       return [{ kind: "assistant", ts, text: extractAssistantText(trimmed) }];
