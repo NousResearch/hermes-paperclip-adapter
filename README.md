@@ -263,6 +263,78 @@ Each tier attempt is logged:
 ...
 ```
 
+### Testing the Fallback Chain
+
+To verify the fallback chain works correctly, you can test tier transitions manually:
+
+**Test 1 — Tier 1 → Tier 2 (rate-limit overflow)**
+
+Simulate a tier-1 rate limit by temporarily setting a bad `MINIMAX_API_KEY`:
+
+```bash
+# Set tier-1 key to a bad value so it hits 429
+MINIMAX_API_KEY="bad-key-for-testing" \
+MINIMAX_PAYG_KEY="<real PAYG key>" \
+hermes chat -q "Say hello" --provider minimax -m MiniMax-M2.7
+# Expected: falls back to tier 2 using MINIMAX_PAYG_KEY
+```
+
+**Test 2 — Tier 2 → Tier 3 (provider outage)**
+
+Simulate tier-2 failure by also providing a bad PAYG key:
+
+```bash
+MINIMAX_API_KEY="bad-key" \
+MINIMAX_PAYG_KEY="also-bad" \
+OPENROUTER_API_KEY="<real OpenRouter key>" \
+hermes chat -q "Say hello" --provider kimi-coding -m moonshotai/kimi-k2.5
+# Expected: tier 3 uses Kimi K2.5 via OpenRouter
+```
+
+**Test 3 — All tiers exhausted**
+
+With all keys bad, verify the adapter returns a clear error:
+
+```
+[hermes] FATAL: All 3 tiers exhausted.
+```
+
+**Programmatic test via the adapter's `execute()` API:**
+
+```typescript
+import { execute } from 'hermes-paperclip-adapter/server';
+
+// Force tier-1 to fail by mocking the error detection
+const result = await execute({
+  agent: { id: 'test-agent', companyId: 'test-company' },
+  config: {
+    hermesCommand: 'hermes',
+    timeoutSec: 60,
+    // Pass bad tier-1 key via env — the adapter will fallback
+    env: { MINIMAX_API_KEY: 'force-tier1-fail' },
+  } as any,
+  onLog: console.log,
+});
+
+// result.provider / result.model will reflect which tier succeeded
+console.log(result.provider, result.model);
+```
+
+**Manual verification of error pattern detection:**
+
+The fallback triggers on these regex patterns (defined in `FALLBACK_ERROR_PATTERNS`):
+
+| Pattern | Trigger |
+|---------|---------|
+| `/429\\s+(?:rate\\s*limit\|limit exceeded)/i` | HTTP 429 rate limit |
+| `/rate\\s*limit/i` | Any "rate limit" in output |
+| `/cap(?:\\s+exceeded\|\\s+reached)/i` | Plan cap exceeded |
+| `/500.*internal/i` | MiniMax 500 error |
+| `/503.*Service Unavailable/i` | MiniMax 503 error |
+| `/provider\\s+down/i` | Provider down message |
+
+Test each by grepping the combined stdout+stderr of a failed run.
+
 ## Development
 
 ```bash
