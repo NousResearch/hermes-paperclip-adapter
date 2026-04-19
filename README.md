@@ -19,6 +19,7 @@ This adapter provides:
 - **Session source tagging** — Sessions are tagged as `tool` source so they don't clutter the user's interactive history
 - **Filesystem checkpoints** — Optional `--checkpoints` for rollback safety
 - **Thinking effort control** — Passes `--reasoning-effort` for thinking/reasoning models
+- **3-tier model fallback** — Transparent resilience: MiniMax plan key → MiniMax PAYG → Kimi K2.5 via OpenRouter. Automatic swap on HTTP 429 or provider outage. Daily spend limits protect runaway costs.
 
 ### Hermes Agent Capabilities
 
@@ -206,6 +207,133 @@ The adapter scans two skill sources and merges them:
 
 The `listSkills` / `syncSkills` APIs expose a unified snapshot so the
 Paperclip UI can display both managed and native skills in one view.
+
+## 3-Tier Model Fallback
+
+The adapter implements automatic 3-tier model fallback for resilience against rate limits and provider outages. This is transparent to the agent — it sees only one model, but the adapter swaps tiers automatically when needed.
+
+### Tier Chain
+
+| Tier | Trigger | Model | Provider | Billing | Daily Budget |
+|------|---------|-------|----------|---------|--------------|
+| 1 (primary) | Normal operation | MiniMax-M2.7 | minimax | MiniMax plan key (10 USD/mo flat) | None (flat plan) |
+| 2 (cap overflow) | Tier 1 returns HTTP 429 or 5xx | MiniMax-M2.7 | minimax | MiniMax PAYG key (~0.05 USD/run) | 5 USD/day |
+| 3 (provider outage) | Tier 2 also fails or MiniMax is down | moonshotai/kimi-k2.5 | kimi-coding | OpenRouter (~0.10 USD/run) | 5 USD/day |
+
+### Fallback Triggers
+
+Fallback is triggered by these patterns in the Hermes output:
+- HTTP 429 (rate limit / plan cap exceeded)
+- HTTP 5xx (provider server error)
+- "rate limit", "cap exceeded", "quota exceeded", "too many requests"
+- "provider is down", "connection refused/reset/timeout"
+
+### Required Keys
+
+For full 3-tier resilience, set these in `~/.hermes/.env`:
+
+```bash
+MINIMAX_API_KEY=<your MiniMax plan key>       # Tier 1
+MINIMAX_PAYG_KEY=<your MiniMax PAYG key>      # Tier 2 (plan-cap overflow)
+OPENROUTER_API_KEY=<your OpenRouter key>      # Tier 3 (provider outage)
+```
+
+If `MINIMAX_PAYG_KEY` is not set, tier 2 is skipped. If `OPENROUTER_API_KEY` is not set, tier 3 is skipped. Without any keys, only tier 1 runs.
+
+### Cost Controls
+
+Tier 2 and tier 3 have a configurable daily spend limit (default 5 USD/day). The counter resets when the Paperclip server restarts. For long-running servers, consider a cron job to alert on spend.
+
+### Concurrency
+
+The 3-tier fallback is not a substitute for concurrency control. The Paperclip concurrency throttle still gates maximum concurrent sessions. Fallback only handles rate-limit and outage scenarios within the allowed concurrency window.
+
+### Tier Selection and Budget Checking
+
+On each run, the adapter iterates tiers in order. Tiers with exhausted daily budgets are skipped silently until the server restarts (which resets the in-process counter). If all tiers are over budget, execution fails with a clear error message.
+
+### Fallback Logging
+
+Each tier attempt is logged:
+```
+[hermes] [Tier 1/3] MiniMax Plan (primary) — model=MiniMax-M2.7, provider=minimax
+[hermes] [Tier 1] Exit code: 0, timed out: false
+[hermes] [Tier 1] FALLBACK triggered: rate-limit or 5xx detected. Trying next tier.
+[hermes] [Tier 2/3] MiniMax PAYG (cap overflow) — model=MiniMax-M2.7, provider=minimax
+...
+```
+
+### Testing the Fallback Chain
+
+To verify the fallback chain works correctly, you can test tier transitions manually:
+
+**Test 1 — Tier 1 → Tier 2 (rate-limit overflow)**
+
+Simulate a tier-1 rate limit by temporarily setting a bad `MINIMAX_API_KEY`:
+
+```bash
+# Set tier-1 key to a bad value so it hits 429
+MINIMAX_API_KEY="bad-key-for-testing" \
+MINIMAX_PAYG_KEY="<real PAYG key>" \
+hermes chat -q "Say hello" --provider minimax -m MiniMax-M2.7
+# Expected: falls back to tier 2 using MINIMAX_PAYG_KEY
+```
+
+**Test 2 — Tier 2 → Tier 3 (provider outage)**
+
+Simulate tier-2 failure by also providing a bad PAYG key:
+
+```bash
+MINIMAX_API_KEY="bad-key" \
+MINIMAX_PAYG_KEY="also-bad" \
+OPENROUTER_API_KEY="<real OpenRouter key>" \
+hermes chat -q "Say hello" --provider kimi-coding -m moonshotai/kimi-k2.5
+# Expected: tier 3 uses Kimi K2.5 via OpenRouter
+```
+
+**Test 3 — All tiers exhausted**
+
+With all keys bad, verify the adapter returns a clear error:
+
+```
+[hermes] FATAL: All 3 tiers exhausted.
+```
+
+**Programmatic test via the adapter's `execute()` API:**
+
+```typescript
+import { execute } from 'hermes-paperclip-adapter/server';
+
+// Force tier-1 to fail by mocking the error detection
+const result = await execute({
+  agent: { id: 'test-agent', companyId: 'test-company' },
+  config: {
+    hermesCommand: 'hermes',
+    timeoutSec: 60,
+    // Pass bad tier-1 key via env — the adapter will fallback
+    env: { MINIMAX_API_KEY: 'force-tier1-fail' },
+  } as any,
+  onLog: console.log,
+});
+
+// result.provider / result.model will reflect which tier succeeded
+console.log(result.provider, result.model);
+```
+
+**Manual verification of error pattern detection:**
+
+The fallback triggers on these regex patterns (defined in `FALLBACK_ERROR_PATTERNS`):
+
+| Pattern | Trigger |
+|---------|---------|
+| `/429\\s+(?:rate\\s*limit\|limit exceeded)/i` | HTTP 429 rate limit |
+| `/rate\\s*limit/i` | Any "rate limit" in output |
+| `/cap(?:\\s+exceeded\|\\s+reached)/i` | Plan cap exceeded |
+| `/500.*internal/i` | MiniMax 500 error |
+| `/503.*Service Unavailable/i` | MiniMax 503 error |
+| `/provider\\s+down/i` | Provider down message |
+
+Test each by grepping the combined stdout+stderr of a failed run.
 
 ## Development
 
