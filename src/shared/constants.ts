@@ -121,6 +121,7 @@ export const FALLBACK_ERROR_PATTERNS = [
 /**
  * Daily spend ceiling per fallback tier (USD).
  * Process restart resets the counter (acceptable for MVP).
+ * Can be overridden per-agent via adapterConfig.fallbackTiers[tierN].dailyBudgetUsd.
  */
 export const DEFAULT_TIER_DAILY_SPEND_LIMIT_USD = 5;
 
