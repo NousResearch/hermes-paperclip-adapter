@@ -115,9 +115,10 @@ class SpendTracker {
 /**
  * Select the first available tier for execution.
  * Respects spend limits — skips tiers that have hit their daily cap.
+ * @param tiers - the active tier list (may be overridden from config)
  */
-function selectInitialTier(spendTracker: SpendTracker): FallbackTier | null {
-  for (const tier of FALLBACK_TIERS) {
+function selectInitialTier(spendTracker: SpendTracker, tiers: FallbackTier[]): FallbackTier | null {
+  for (const tier of tiers) {
     const remaining = spendTracker.getRemainingBudget(tier);
     if (remaining === null || remaining > 0) {
       return tier;
@@ -558,6 +559,40 @@ async function executeWithTier(opts: TierExecutionOptions): Promise<TierResult> 
 // Main execute
 // ---------------------------------------------------------------------------
 
+/**
+ * Apply per-tier budget overrides from the adapter config.
+ * Falls back to the DEFAULT constants.
+ */
+interface FallbackTierOverride {
+  /** Tier 1, 2, or 3 */
+  tier: number;
+  /** Override daily budget (null = no limit, undefined = use default) */
+  dailyBudgetUsd?: number | null;
+}
+
+function resolveFallbackTiers(
+  config: Record<string, unknown>,
+  defaultTiers: FallbackTier[],
+): FallbackTier[] {
+  const overrides = ((config.fallbackTiers as FallbackTierOverride[]) ?? [])
+    .reduce<Record<number, FallbackTierOverride>>((acc, o) => {
+      acc[o.tier] = o;
+      return acc;
+    }, {});
+
+  return defaultTiers.map((tier) => {
+    const override = overrides[tier.tier];
+    if (override === undefined) return tier;
+    return {
+      ...tier,
+      dailySpendLimitUsd:
+        override.dailyBudgetUsd === undefined
+          ? tier.dailySpendLimitUsd
+          : override.dailyBudgetUsd,
+    };
+  });
+}
+
 export async function execute(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
@@ -618,7 +653,8 @@ export async function execute(
 
   // ── Select initial tier ───────────────────────────────────────────────
   const spendTracker = new SpendTracker();
-  let currentTier = selectInitialTier(spendTracker);
+  const activeTiers = resolveFallbackTiers(config, FALLBACK_TIERS);
+  let currentTier = selectInitialTier(spendTracker, activeTiers);
 
   if (!currentTier) {
     // All tiers over budget
@@ -637,7 +673,7 @@ export async function execute(
   // ── Tier loop ─────────────────────────────────────────────────────────
   let lastResult: TierResult | null = null;
 
-  for (let attempt = 0; attempt < FALLBACK_TIERS.length; attempt++) {
+  for (let attempt = 0; attempt < activeTiers.length; attempt++) {
     const tier = currentTier;
     if (!tier) break; // no more tiers available
 
