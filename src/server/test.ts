@@ -14,7 +14,7 @@ import type {
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
+import { HERMES_CLI, ADAPTER_TYPE } from "../shared/constants.js";
 import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 
 const execFileAsync = promisify(execFile);
@@ -31,9 +31,8 @@ async function checkCliInstalled(
   command: string,
 ): Promise<AdapterEnvironmentCheck | null> {
   try {
-    // Try to run the command to see if it exists
     await execFileAsync(command, ["--version"], { timeout: 10_000 });
-    return null; // OK — it ran successfully
+    return null; // OK
   } catch (err: unknown) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") {
@@ -44,8 +43,6 @@ async function checkCliInstalled(
         code: "hermes_cli_not_found",
       };
     }
-    // Command exists but --version might have failed for some reason
-    // Still consider it installed
     return null;
   }
 }
@@ -133,9 +130,8 @@ function checkModel(
 function checkApiKeys(
   config: Record<string, unknown>,
 ): AdapterEnvironmentCheck | null {
-  // The server resolves secret refs into config.env before calling testEnvironment,
-  // so we check config.env first (adapter-configured secrets), then fall back to
-  // process.env (server/host environment). This mirrors how the Claude adapter does it.
+  // Secrets are resolved by the server before calling testEnvironment.
+  // Check config.env first (adapter-configured), then process.env (host).
   const envConfig = (config.env ?? {}) as Record<string, unknown>;
   const resolvedEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
@@ -151,12 +147,13 @@ function checkApiKeys(
   const hasZai = has("ZAI_API_KEY");
   const hasKimi = has("KIMI_API_KEY");
   const hasMiniMax = has("MINIMAX_API_KEY");
+  const hasMiniMaxPayg = has("MINIMAX_PAYG_KEY");
 
-  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI && !hasZai && !hasKimi && !hasMiniMax) {
+  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI && !hasZai && !hasKimi && !hasMiniMax && !hasMiniMaxPayg) {
     return {
       level: "warn",
       message: "No LLM API keys found in environment",
-      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
+      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY, MINIMAX_PAYG_KEY",
       code: "hermes_no_api_keys",
     };
   }
@@ -167,7 +164,18 @@ function checkApiKeys(
   if (hasOpenAI) providers.push("OpenAI");
   if (hasZai) providers.push("Z.AI");
   if (hasKimi) providers.push("Kimi");
-  if (hasMiniMax) providers.push("MiniMax");
+  if (hasMiniMax) providers.push("MiniMax Plan");
+  if (hasMiniMaxPayg) providers.push("MiniMax PAYG (fallback tier 2)");
+
+  // Warn if 3-tier fallback is configured but PAYG key is missing
+  if (hasMiniMax && !hasMiniMaxPayg) {
+    return {
+      level: "warn",
+      message: `API keys found: ${providers.join(", ")}`,
+      hint: "MINIMAX_PAYG_KEY is not set — tier-2 PAYG fallback will not be available. Set it in ~/.hermes/.env to enable 3-tier resilience.",
+      code: "hermes_missing_payg_key",
+    };
+  }
 
   return {
     level: "info",
@@ -188,7 +196,6 @@ async function checkProviderConsistency(
 
   const explicitProvider = asString(config.provider);
 
-  // Try to detect from Hermes config
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   try {
     detectedConfig = await detectModel();
@@ -203,8 +210,6 @@ async function checkProviderConsistency(
     model,
   });
 
-  // If provider was explicitly set but doesn't match what Hermes config says,
-  // that's worth flagging.
   if (explicitProvider && detectedConfig?.provider && explicitProvider !== detectedConfig.provider) {
     return {
       level: "warn",
@@ -214,7 +219,6 @@ async function checkProviderConsistency(
     };
   }
 
-  // If provider was auto-detected (not explicitly set), log what was resolved
   if (!explicitProvider && resolvedFrom !== "auto") {
     return {
       level: "info",
@@ -223,7 +227,6 @@ async function checkProviderConsistency(
     };
   }
 
-  // If we couldn't resolve any provider, warn
   if (resolvedFrom === "auto" && !explicitProvider) {
     return {
       level: "warn",

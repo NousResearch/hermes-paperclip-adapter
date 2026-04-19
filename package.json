@@ -31,6 +31,7 @@
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
+    "test:fallback": "bash scripts/test-fallback.sh",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -38,7 +39,7 @@
     "picocolors": "^1.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^22.19.17",
     "typescript": "^5.7.0"
   },
   "engines": {

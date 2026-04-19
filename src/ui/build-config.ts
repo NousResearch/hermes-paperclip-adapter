@@ -83,5 +83,12 @@ export function buildHermesConfig(
 
   // Heartbeat config is handled by Paperclip itself
 
+  // 3-tier fallback overrides (per-tier daily budget)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fallbackTiers = (v as any).fallbackTiers;
+  if (fallbackTiers && typeof fallbackTiers === 'object') {
+    ac.fallbackTiers = fallbackTiers;
+  }
+
   return ac;
 }

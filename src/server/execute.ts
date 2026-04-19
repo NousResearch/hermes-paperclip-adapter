@@ -37,6 +37,9 @@ import {
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
   VALID_PROVIDERS,
+  FALLBACK_TIERS,
+  FALLBACK_ERROR_PATTERNS,
+  type FallbackTier,
 } from "../shared/constants.js";
 
 import {
@@ -64,6 +67,77 @@ function cfgStringArray(v: unknown): string[] | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Spend tracker (in-process, reset on process restart — acceptable for MVP)
+// ---------------------------------------------------------------------------
+
+interface DailySpendEntry {
+  date: string; // YYYY-MM-DD
+  spentUsd: number;
+}
+
+class SpendTracker {
+  private entries: Map<number, DailySpendEntry> = new Map();
+
+  /**
+   * Check if a tier is within its daily spend limit.
+   * Returns the remaining budget, or null if no limit.
+   */
+  getRemainingBudget(tier: FallbackTier): number | null {
+    if (tier.dailySpendLimitUsd === null || tier.dailySpendLimitUsd === undefined) {
+      return null;
+    }
+    const key = this.todayKey();
+    const entry = this.entries.get(tier.tier);
+    const spent = entry?.date === key ? entry.spentUsd : 0;
+    return Math.max(0, tier.dailySpendLimitUsd - spent);
+  }
+
+  /**
+   * Record spend for a tier.
+   */
+  recordSpend(tier: FallbackTier, costUsd: number): void {
+    if (tier.dailySpendLimitUsd === null || tier.dailySpendLimitUsd === undefined) return;
+    const key = this.todayKey();
+    const entry = this.entries.get(tier.tier);
+    const current = entry?.date === key ? entry.spentUsd : 0;
+    this.entries.set(tier.tier, { date: key, spentUsd: current + costUsd });
+  }
+
+  private todayKey(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tier selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Select the first available tier for execution.
+ * Respects spend limits — skips tiers that have hit their daily cap.
+ * @param tiers - the active tier list (may be overridden from config)
+ */
+function selectInitialTier(spendTracker: SpendTracker, tiers: FallbackTier[]): FallbackTier | null {
+  for (const tier of tiers) {
+    const remaining = spendTracker.getRemainingBudget(tier);
+    if (remaining === null || remaining > 0) {
+      return tier;
+    }
+    // Budget exhausted — try next tier silently
+  }
+  return null;
+}
+
+/**
+ * Check whether an error in combined stdout+stderr should trigger
+ * fallback to the next tier.
+ */
+function shouldFallback(tier: FallbackTier, combinedOutput: string): boolean {
+  if (!tier.errorPatterns) return false;
+  return tier.errorPatterns.some((pattern) => pattern.test(combinedOutput));
+}
+
+// ---------------------------------------------------------------------------
 // Wake-up prompt builder
 // ---------------------------------------------------------------------------
 
@@ -80,26 +154,28 @@ Your Paperclip identity:
 ## Assigned Task
 
 Issue ID: {{taskId}}
-Title: {{taskTitle}}
 
-{{taskBody}}
+First, fetch your full task details (title + description):
+  \`curl -s -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/{{taskId}}"\`
+
+Read the response JSON — the "title" and "description" fields are your task instructions. Execute accordingly.
 
 ## Workflow
 
 1. Work on the task using your tools
 2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
 3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here"}'\`
 4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
 {{#commentId}}
 ## Comment on This Issue
 
 Someone commented. Read it:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
+  \`curl -s -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
 
 Address the comment, POST a reply if needed, then continue working.
 {{/commentId}}
@@ -108,17 +184,18 @@ Address the comment, POST a reply if needed, then continue working.
 ## Heartbeat Wake — Check for Work
 
 1. List ALL open issues assigned to you (todo, backlog, in_progress):
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
+   \`curl -s -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i["identifier"]} {i["status"]:>12} {i["priority"]:>6} {i["title"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
 
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
-   - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
-   - Do the work in the project directory: {{projectName}}
+   - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
+   - For code changes: \`cd /root/projects/maximiza-tu-dinero && git checkout main && git pull\` then create a branch, make changes, commit, push, and create a PR (see Workflow above)
+   - For non-code tasks: do the work and post findings as a comment
    - When done, mark complete and post a comment (see Workflow steps 2-4 above)
 
 3. If no issues assigned to you, check for unassigned issues:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
+   \`curl -s -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i["identifier"]} {i["title"]}') for i in issues if not i.get('assigneeAgentId')]" \`
    If you find a relevant issue, assign it to yourself:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPER...KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
 
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
@@ -129,14 +206,14 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const taskId = cfgString((ctx as any).context?.taskId ?? (ctx as any).context?.issueId ?? ctx.config?.taskId);
+  const taskTitle = cfgString((ctx as any).context?.taskTitle ?? ctx.config?.taskTitle) || "";
+  const taskBody = cfgString((ctx as any).context?.taskBody ?? ctx.config?.taskBody) || "";
+  const commentId = cfgString((ctx as any).context?.commentId ?? ctx.config?.commentId) || "";
+  const wakeReason = cfgString((ctx as any).context?.wakeReason ?? ctx.config?.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = cfgString((ctx as any).context?.companyName ?? ctx.config?.companyName) || "";
+  const projectName = cfgString((ctx as any).context?.projectName ?? ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -199,8 +276,7 @@ const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 
 /** Regex to extract token usage from Hermes output. */
-const TOKEN_USAGE_REGEX =
-  /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
+const TOKEN_USAGE_REGEX = /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
 
 /** Regex to extract cost from Hermes output. */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
@@ -227,18 +303,18 @@ function cleanResponse(raw: string): string {
       if (t.startsWith("[tool]") || t.startsWith("[hermes]") || t.startsWith("[paperclip]")) return false;
       if (t.startsWith("session_id:")) return false;
       if (/^\[\d{4}-\d{2}-\d{2}T/.test(t)) return false;
-      if (/^\[done\]\s*┊/.test(t)) return false;
-      if (/^┊\s*[\p{Emoji_Presentation}]/u.test(t) && !/^┊\s*💬/.test(t)) return false;
+      if (/^\[done\]\s*\u2502/.test(t)) return false;
+      if (/^\u2502\s*[\p{Emoji_Presentation}]/u.test(t) && !/^\u2502\s*\U0001f4ac/.test(t)) return false;
       if (/^\p{Emoji_Presentation}\s*(Completed|Running|Error)?\s*$/u.test(t)) return false;
       return true;
     })
     .map((line) => {
-      let t = line.replace(/^[\s]*┊\s*💬\s*/, "").trim();
+      let t = line.replace(/^[\s]*\u2502\s*\U0001f4ac\s*/, "").trim();
       t = t.replace(/^\[done\]\s*/, "").trim();
       return t;
     })
     .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n{3,}/g, "\n")
     .trim();
 }
 
@@ -306,72 +382,65 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Main execute
+// Per-tier execution
 // ---------------------------------------------------------------------------
 
-export async function execute(
-  ctx: AdapterExecutionContext,
-): Promise<AdapterExecutionResult> {
-  const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+interface TierExecutionOptions {
+  tier: FallbackTier;
+  prompt: string;
+  config: Record<string, unknown>;
+  hermesCmd: string;
+  timeoutSec: number;
+  graceSec: number;
+  maxTurns?: number;
+  toolsets?: string;
+  extraArgs?: string[];
+  persistSession: boolean;
+  worktreeMode: boolean;
+  checkpoints: boolean;
+  verbose?: boolean;
+  prevSessionId?: string;
+  cwd: string;
+  baseEnv: Record<string, string>;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+}
 
-  // ── Resolve configuration ──────────────────────────────────────────────
-  const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
-  const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
-  const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
-  const maxTurns = cfgNumber(config.maxTurnsPerRun);
-  const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
-  const extraArgs = cfgStringArray(config.extraArgs);
-  const persistSession = cfgBoolean(config.persistSession) !== false;
-  const worktreeMode = cfgBoolean(config.worktreeMode) === true;
-  const checkpoints = cfgBoolean(config.checkpoints) === true;
+interface TierResult {
+  tier: FallbackTier;
+  executionResult: AdapterExecutionResult;
+  fallbackReason?: string;
+}
 
-  // ── Resolve provider (defense in depth) ────────────────────────────────
-  // Priority chain:
-  //   1. Explicit provider in adapterConfig (user override)
-  //   2. Provider from ~/.hermes/config.yaml (detected at runtime)
-  //   3. Provider inferred from model name prefix
-  //   4. "auto" (let Hermes decide)
-  //
-  // This ensures that even if the agent was created before provider tracking
-  // was added, or if the model was changed without updating provider, the
-  // correct provider is still used.
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  const explicitProvider = cfgString(config.provider);
+async function executeWithTier(opts: TierExecutionOptions): Promise<TierResult> {
+  const { tier, prompt, config, hermesCmd, timeoutSec, graceSec, maxTurns, toolsets, extraArgs, persistSession, worktreeMode, checkpoints, verbose, prevSessionId, cwd, baseEnv, onLog } = opts;
 
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel();
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
+  // Build tier-specific environment
+  const env: Record<string, string> = { ...baseEnv };
+
+  // Tier 2: swap MINIMAX_API_KEY to PAYG key
+  if (tier.minimaxApiKeyOverride) {
+    env["MINIMAX_API_KEY"] = tier.minimaxApiKeyOverride;
   }
 
-  const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
-    explicitProvider,
-    detectedProvider: detectedConfig?.provider,
-    detectedModel: detectedConfig?.model,
-    model,
-  });
+  // Tier 3: ensure OPENROUTER_API_KEY is set (for Kimi K2.5 via OpenRouter)
+  // Tier 2: ensure MINIMAX_PAYG_KEY is available in env (used by provider)
+  if (tier.tier === 2 && process.env["MINIMAX_PAYG_KEY"]) {
+    env["MINIMAX_PAYG_KEY"] = process.env["MINIMAX_PAYG_KEY"];
+  }
+  if (tier.tier === 3 && process.env["OPENROUTER_API_KEY"]) {
+    env["OPENROUTER_API_KEY"] = process.env["OPENROUTER_API_KEY"];
+  }
 
-  // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
-
-  // ── Build command args ─────────────────────────────────────────────────
-  // Use -Q (quiet) to get clean output: just response + session_id line
+  // Build command args
   const useQuiet = cfgBoolean(config.quiet) !== false; // default true
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  if (model) {
-    args.push("-m", model);
-  }
+  // Use tier's model
+  args.push("-m", tier.model);
 
-  // Always pass --provider when we have a resolved one (not "auto").
-  // "auto" means Hermes will decide on its own — no need to pass it.
-  if (resolvedProvider !== "auto") {
-    args.push("--provider", resolvedProvider);
-  }
+  // Provider: use tier's provider (not "auto" — explicit for fallback tiers)
+  args.push("--provider", tier.provider);
 
   if (toolsets) {
     args.push("-t", toolsets);
@@ -383,23 +452,15 @@ export async function execute(
 
   if (worktreeMode) args.push("-w");
   if (checkpoints) args.push("--checkpoints");
-  if (cfgBoolean(config.verbose) === true) args.push("-v");
+  if (verbose) args.push("-v");
 
-  // Tag sessions as "tool" source so they don't clutter the user's session history.
-  // Requires hermes-agent >= PR #3255 (feat/session-source-tag).
+  // Tag sessions as "tool" source
   args.push("--source", "tool");
 
-  // Bypass Hermes dangerous-command approval prompts.
-  // Paperclip agents run as non-interactive subprocesses with no TTY,
-  // so approval prompts would always timeout and deny legitimate commands
-  // (curl, python3 -c, etc.). Agents operate in a sandbox — the approval
-  // system is designed for human-attended interactive sessions.
+  // Bypass dangerous-command approval prompts
   args.push("--yolo");
 
   // Session resume
-  const prevSessionId = cfgString(
-    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
-  );
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
@@ -408,94 +469,47 @@ export async function execute(
     args.push(...extraArgs);
   }
 
-  // ── Build environment ──────────────────────────────────────────────────
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...buildPaperclipEnv(ctx.agent),
-  };
+  // Log tier start
+  await onLog("stdout", `[hermes] [Tier ${tier.tier}/${FALLBACK_TIERS.length}] ${tier.label} — model=${tier.model}, provider=${tier.provider}\n`);
 
-  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
-    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
-  if (taskId) env.PAPERCLIP_TASK_ID = taskId;
-
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
-  }
-
-  // ── Resolve working directory ──────────────────────────────────────────
-  const cwd =
-    cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
-  try {
-    await ensureAbsoluteDirectory(cwd);
-  } catch {
-    // Non-fatal
-  }
-
-  // ── Log start ──────────────────────────────────────────────────────────
-  await ctx.onLog(
-    "stdout",
-    `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
-  );
-  if (prevSessionId) {
-    await ctx.onLog(
-      "stdout",
-      `[hermes] Resuming session: ${prevSessionId}\n`,
-    );
-  }
-
-  // ── Execute ────────────────────────────────────────────────────────────
-  // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
-  // Paperclip renders all stderr as red/error in the UI.
-  // Wrap onLog to reclassify benign stderr lines as stdout.
-  const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
-    if (stream === "stderr") {
-      const trimmed = chunk.trimEnd();
-      // Benign patterns that should NOT appear as errors:
-      // - Structured log lines: [timestamp] INFO/DEBUG/WARN: ...
-      // - MCP server registration messages
-      // - Python import/site noise
-      const isBenign = /^\[?\d{4}[-/]\d{2}[-/]\d{2}T/.test(trimmed) || // structured timestamps
-        /^[A-Z]+:\s+(INFO|DEBUG|WARN|WARNING)\b/.test(trimmed) || // log levels
-        /Successfully registered all tools/.test(trimmed) ||
-        /MCP [Ss]erver/.test(trimmed) ||
-        /tool registered successfully/.test(trimmed) ||
-        /Application initialized/.test(trimmed);
-      if (isBenign) {
-        return ctx.onLog("stdout", chunk);
-      }
-    }
-    return ctx.onLog(stream, chunk);
-  };
-
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
+  // Execute
+  const result = await runChildProcess("", hermesCmd, args, {
     cwd,
     env,
     timeoutSec,
     graceSec,
-    onLog: wrappedOnLog,
+    onLog: async (stream, chunk) => {
+      // Reclassify benign stderr lines as stdout before passing to onLog
+      if (stream === "stderr") {
+        const trimmed = chunk.trimEnd();
+        const isBenign = /^\[?\d{4}[-/]\d{2}[-/]\d{2}T/.test(trimmed) ||
+          /^[A-Z]+:\s+(INFO|DEBUG|WARN|WARNING)\b/.test(trimmed) ||
+          /Successfully registered all tools/.test(trimmed) ||
+          /MCP [Ss]erver/.test(trimmed) ||
+          /tool registered successfully/.test(trimmed) ||
+          /Application initialized/.test(trimmed);
+        if (isBenign) {
+          await onLog("stdout", chunk);
+          return;
+        }
+      }
+      await onLog(stream, chunk);
+    },
   });
 
-  // ── Parse output ───────────────────────────────────────────────────────
+  // Parse output
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+  const combinedOutput = (result.stdout || "") + "\n" + (result.stderr || "");
 
-  await ctx.onLog(
-    "stdout",
-    `[hermes] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`,
-  );
-  if (parsed.sessionId) {
-    await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
-  }
+  await onLog("stdout", `[hermes] [Tier ${tier.tier}] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`);
 
-  // ── Build result ───────────────────────────────────────────────────────
+  // Build execution result
   const executionResult: AdapterExecutionResult = {
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    provider: resolvedProvider,
-    model,
+    provider: tier.provider,
+    model: tier.model,
   };
 
   if (parsed.errorMessage) {
@@ -510,17 +524,17 @@ export async function execute(
     executionResult.costUsd = parsed.costUsd;
   }
 
-  // Summary from agent response
   if (parsed.response) {
     executionResult.summary = parsed.response.slice(0, 2000);
   }
 
-  // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
+    tier: tier.tier,
+    tier_label: tier.label,
   };
 
   // Store session ID for next run
@@ -529,5 +543,221 @@ export async function execute(
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 
-  return executionResult;
+  // Determine if this tier should fallback
+  let fallbackReason: string | undefined;
+  if (shouldFallback(tier, combinedOutput)) {
+    fallbackReason = "rate-limit or 5xx detected";
+  } else if (result.exitCode !== null && result.exitCode !== 0 && !parsed.response) {
+    // Non-zero exit with no response = hard failure
+    fallbackReason = `non-zero exit code ${result.exitCode} with no response`;
+  }
+
+  return { tier, executionResult, fallbackReason };
+}
+
+// ---------------------------------------------------------------------------
+// Main execute
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply per-tier budget overrides from the adapter config.
+ * Falls back to the DEFAULT constants.
+ */
+interface FallbackTierOverride {
+  /** Tier 1, 2, or 3 */
+  tier: number;
+  /** Override daily budget (null = no limit, undefined = use default) */
+  dailyBudgetUsd?: number | null;
+}
+
+function resolveFallbackTiers(
+  config: Record<string, unknown>,
+  defaultTiers: FallbackTier[],
+): FallbackTier[] {
+  const overrides = ((config.fallbackTiers as FallbackTierOverride[]) ?? [])
+    .reduce<Record<number, FallbackTierOverride>>((acc, o) => {
+      acc[o.tier] = o;
+      return acc;
+    }, {});
+
+  return defaultTiers.map((tier) => {
+    const override = overrides[tier.tier];
+    if (override === undefined) return tier;
+    return {
+      ...tier,
+      dailySpendLimitUsd:
+        override.dailyBudgetUsd === undefined
+          ? tier.dailySpendLimitUsd
+          : override.dailyBudgetUsd,
+    };
+  });
+}
+
+export async function execute(
+  ctx: AdapterExecutionContext,
+): Promise<AdapterExecutionResult> {
+  const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+
+  // ── Resolve configuration ──────────────────────────────────────────────
+  const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
+  const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+  const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
+  const maxTurns = cfgNumber(config.maxTurnsPerRun);
+  const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
+  const extraArgs = cfgStringArray(config.extraArgs);
+  const persistSession = cfgBoolean(config.persistSession) !== false;
+  const worktreeMode = cfgBoolean(config.worktreeMode) === true;
+  const checkpoints = cfgBoolean(config.checkpoints) === true;
+  const verbose = cfgBoolean(config.verbose) === true;
+
+  // ── Build prompt ───────────────────────────────────────────────────────
+  const prompt = buildPrompt(ctx, config);
+
+  // ── Build base environment ─────────────────────────────────────────────
+  const baseEnv: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ...buildPaperclipEnv(ctx.agent),
+  };
+
+  if (ctx.runId) baseEnv.PAPERCLIP_RUN_ID = ctx.runId;
+  if ((ctx as any).authToken && !baseEnv.PAPERCLIP_API_KEY)
+    baseEnv.PAPERCLIP_API_KEY = (ctx as any).authToken as string;
+  const taskId = cfgString((ctx as any).context?.taskId ?? (ctx as any).context?.issueId ?? ctx.config?.taskId);
+  if (taskId) baseEnv.PAPERCLIP_TASK_ID = taskId;
+
+  const userEnv = config.env as Record<string, string> | undefined;
+  if (userEnv && typeof userEnv === "object") {
+    Object.assign(baseEnv, userEnv);
+  }
+
+  // ── Resolve working directory ──────────────────────────────────────────
+  const cwd = cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
+  try {
+    await ensureAbsoluteDirectory(cwd);
+  } catch {
+    // Non-fatal
+  }
+
+  // ── Wrapped onLog helper ───────────────────────────────────────────────
+  const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
+    await ctx.onLog(stream, chunk);
+  };
+
+  // ── Session resume ID ─────────────────────────────────────────────────
+  const prevSessionId = cfgString(
+    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
+  );
+  if (prevSessionId) {
+    await ctx.onLog("stdout", `[hermes] Resuming session: ${prevSessionId}\n`);
+  }
+
+  // ── Select initial tier ───────────────────────────────────────────────
+  const spendTracker = new SpendTracker();
+  const activeTiers = resolveFallbackTiers(config, FALLBACK_TIERS);
+  let currentTier = selectInitialTier(spendTracker, activeTiers);
+
+  if (!currentTier) {
+    // All tiers over budget
+    await ctx.onLog("stderr", "[hermes] ERROR: All fallback tiers over daily spend limit. Cannot execute.\n");
+    return {
+      exitCode: 1,
+      errorMessage: "All fallback tiers over daily spend limit",
+      summary: "No tier available: daily budgets exhausted",
+      model: "unknown",
+      provider: "unknown",
+      signal: null,
+      timedOut: false,
+    };
+  }
+
+  // ── Tier loop ─────────────────────────────────────────────────────────
+  let lastResult: TierResult | null = null;
+
+  for (let attempt = 0; attempt < activeTiers.length; attempt++) {
+    const tier = currentTier;
+    if (!tier) break; // no more tiers available
+
+    const result = await executeWithTier({
+      tier,
+      prompt,
+      config,
+      hermesCmd,
+      timeoutSec,
+      graceSec,
+      maxTurns,
+      toolsets,
+      extraArgs,
+      persistSession,
+      worktreeMode,
+      checkpoints,
+      verbose,
+      prevSessionId,
+      cwd,
+      baseEnv,
+      onLog: wrappedOnLog,
+    });
+
+    lastResult = result;
+
+    // Record spend (costUsd may be number | null from AdapterExecutionResult)
+    if (result.executionResult.costUsd != null && typeof result.executionResult.costUsd === "number") {
+      spendTracker.recordSpend(tier, result.executionResult.costUsd);
+    }
+
+    // Check if we should fallback
+    if (result.fallbackReason) {
+      await ctx.onLog("stdout", `[hermes] [Tier ${tier.tier}] FALLBACK triggered: ${result.fallbackReason}. Trying next tier.\n`);
+
+      // Move to next tier
+      const currentTierIndex = FALLBACK_TIERS.findIndex(t => t.tier === tier.tier);
+      currentTier = FALLBACK_TIERS[currentTierIndex + 1] ?? null;
+
+      // Skip tiers that are over budget
+      while (currentTier && spendTracker.getRemainingBudget(currentTier) === 0) {
+        await ctx.onLog("stdout", `[hermes] [Tier ${currentTier.tier}] Skipping — daily budget exhausted.\n`);
+        const idx = FALLBACK_TIERS.findIndex(t => t.tier === currentTier!.tier);
+        currentTier = FALLBACK_TIERS[idx + 1] ?? null;
+      }
+
+      if (!currentTier) {
+        // No tier left — return tier-3 error
+        await ctx.onLog("stderr", `[hermes] FATAL: All ${FALLBACK_TIERS.length} tiers exhausted.\n`);
+        return {
+          ...result.executionResult,
+          errorMessage: [
+            result.executionResult.errorMessage,
+            `All fallback tiers exhausted (1->2->3). Last tier (${tier.tier}): ${result.fallbackReason}`,
+          ].filter(Boolean).join("; ") || "All fallback tiers exhausted",
+          summary: result.executionResult.summary,
+        };
+      }
+
+      // Continue to next tier
+      continue;
+    }
+
+    // Tier succeeded — return its result
+    return result.executionResult;
+  }
+
+  // Should not reach here, but defensive
+  if (lastResult) {
+    return {
+      ...lastResult.executionResult,
+      errorMessage: [
+        lastResult.executionResult.errorMessage,
+        "Unexpected: fell through tier loop",
+      ].filter(Boolean).join("; ") || "Unexpected fallback loop exit",
+    };
+  }
+
+  return {
+    exitCode: 1,
+    errorMessage: "Fallback loop: no result returned",
+    summary: "Fallback loop produced no result",
+    model: "unknown",
+    provider: "unknown",
+    signal: null,
+    timedOut: false,
+  };
 }
