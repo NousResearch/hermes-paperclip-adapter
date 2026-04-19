@@ -129,11 +129,11 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const taskId = cfgString(ctx.context?.taskId ?? ctx.context?.issueId ?? ctx.config?.taskId);
+  const taskTitle = cfgString(ctx.context?.taskTitle ?? ctx.config?.taskTitle) || "";
+  const taskBody = cfgString(ctx.context?.taskBody ?? ctx.config?.taskBody) || "";
+  const commentId = cfgString(ctx.context?.commentId ?? ctx.config?.commentId) || "";
+  const wakeReason = cfgString(ctx.context?.wakeReason ?? ctx.config?.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
   const companyName = cfgString(ctx.config?.companyName) || "";
   const projectName = cfgString(ctx.config?.projectName) || "";
