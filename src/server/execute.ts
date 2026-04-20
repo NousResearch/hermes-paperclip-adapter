@@ -39,6 +39,46 @@ import {
   VALID_PROVIDERS,
 } from "../shared/constants.js";
 
+// -----------------------------------------------------------------------------
+// Concurrency cap — MAX-196
+// -----------------------------------------------------------------------------
+// Hard cap at adapter level: if an agent already has N=2 runs in status=running
+// for this company, suppress the new run and let stranded-issue reconciliation
+// pick it up (~30s cycle). Cap applies per agent per company.
+//
+// This is the dispatcher-level fix complementing the prompt-level MAX-185 throttle.
+// MAX-185 remains as a belt-and-suspenders fallback.
+//
+// Only status=running counts toward the cap — queued runs do NOT.
+const CONCURRENCY_CAP = 2;
+
+/**
+ * Returns true if the target agent already has CONCURRENCY_CAP or more runs
+ * in status=running for the given company (per /api/companies/{id}/live-runs).
+ *
+ * Fails open: if the API call errors, returns false so work is not blocked
+ * by an infrastructure blip.
+ */
+async function isConcurrencyCapped(
+  agentId: string,
+  companyId: string,
+  apiBase: string,
+): Promise<boolean> {
+  try {
+    const url = `${apiBase.replace(/\/+$/, "")}/companies/${companyId}/live-runs`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return false;
+    const runs: Array<{ agentId: string; status: string }> = await res.json();
+    const active = runs.filter(
+      (r) => r.agentId === agentId && r.status === "running",
+    );
+    return active.length >= CONCURRENCY_CAP;
+  } catch {
+    // Fail open — if we can't reach the API, don't block work
+    return false;
+  }
+}
+
 import {
   detectModel,
   resolveProvider,
@@ -313,6 +353,36 @@ export async function execute(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+
+  // ── Concurrency cap pre-flight (MAX-196) ──────────────────────────────
+  // Build API URL once for use in both the cap check and the prompt.
+  const paperclipApiUrl =
+    cfgString(config.paperclipApiUrl) ||
+    process.env.PAPERCLIP_API_URL ||
+    "http://127.0.0.1:3201/api";
+  const apiBase =
+    paperclipApiUrl.endsWith("/api")
+      ? paperclipApiUrl
+      : paperclipApiUrl.replace(/\/+$/, "") + "/api";
+
+  const agentId = ctx.agent?.id || "";
+  const companyId = ctx.agent?.companyId || "";
+
+  if (agentId && companyId) {
+    const capped = await isConcurrencyCapped(agentId, companyId, apiBase);
+    if (capped) {
+      await ctx.onLog(
+        "stdout",
+        `[hermes] Concurrency capped (${CONCURRENCY_CAP}+ active runs for agent ${agentId}). Suppressing run.\n`,
+      );
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        summary: `Concurrency capped (agent has ${CONCURRENCY_CAP}+ active runs). Run suppressed — stranded-issue reconciliation will retry.`,
+      };
+    }
+  }
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
