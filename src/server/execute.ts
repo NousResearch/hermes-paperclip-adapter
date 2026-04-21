@@ -88,11 +88,11 @@ Title: {{taskTitle}}
 
 1. Work on the task using your tools
 2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
 3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
 4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
 {{#commentId}}
@@ -118,7 +118,7 @@ Address the comment, POST a reply if needed, then continue working.
 3. If no issues assigned to you, check for unassigned issues:
    \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
    If you find a relevant issue, assign it to yourself:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
 
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
@@ -129,14 +129,23 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const taskId = cfgString(ctx.context?.taskId) || cfgString(ctx.config?.taskId);
+  const taskTitle =
+    cfgString(ctx.context?.taskTitle) || cfgString(ctx.config?.taskTitle) || "";
+  const taskBody =
+    cfgString(ctx.context?.taskBody) || cfgString(ctx.config?.taskBody) || "";
+  const commentId =
+    cfgString(ctx.context?.commentId) ||
+    cfgString(ctx.context?.wakeCommentId) ||
+    cfgString(ctx.config?.commentId) ||
+    "";
+  const wakeReason =
+    cfgString(ctx.context?.wakeReason) || cfgString(ctx.config?.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName =
+    cfgString(ctx.context?.companyName) || cfgString(ctx.config?.companyName) || "";
+  const projectName =
+    cfgString(ctx.context?.projectName) || cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -417,8 +426,16 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  const taskId = cfgString(ctx.context?.taskId) || cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
+  const wakeCommentId =
+    cfgString(ctx.context?.wakeCommentId) ||
+    cfgString(ctx.context?.commentId) ||
+    cfgString(ctx.config?.commentId);
+  if (wakeCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = wakeCommentId;
+  const wakeReason =
+    cfgString(ctx.context?.wakeReason) || cfgString(ctx.config?.wakeReason);
+  if (wakeReason) env.PAPERCLIP_WAKE_REASON = wakeReason;
 
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {

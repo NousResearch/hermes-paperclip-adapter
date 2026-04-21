@@ -81,4 +81,6 @@ tools, persistent memory, session persistence, skills, and MCP support.
 - \`{{taskTitle}}\` — Task title (if assigned)
 - \`{{taskBody}}\` — Task description (if assigned)
 - \`{{projectName}}\` — Project name (if scoped to a project)
+- \`{{commentId}}\` — Comment ID (when woken by a comment)
+- \`{{wakeReason}}\` — Wake reason for this heartbeat
 `;
