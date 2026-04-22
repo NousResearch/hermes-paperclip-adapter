@@ -1,12 +1,12 @@
 /**
  * Server-side execution logic for the Hermes Agent adapter.
  *
- * Spawns `hermes chat -q "..." -Q` as a child process, streams output,
+ * Spawns `hermes chat -q "..." --quiet` as a child process, streams output,
  * and returns structured results to Paperclip.
  *
  * Verified CLI flags (hermes chat):
  *   -q/--query         single query (non-interactive)
- *   -Q/--quiet         quiet mode (no banner/spinner, only response + session_id)
+ *   --quiet            quiet mode (no banner/spinner, only response + session_id)
  *   -m/--model         model name (e.g. anthropic/claude-sonnet-4)
  *   -t/--toolsets      comma-separated toolsets to enable
  *   --provider         inference provider (auto, openrouter, nous, etc.)
@@ -358,10 +358,12 @@ export async function execute(
   const prompt = buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
-  // Use -Q (quiet) to get clean output: just response + session_id line
+  // Use --quiet to get clean output: just response + session_id line
+  // Note: Hermes CLI (v0.10.0) does not support -Q as a shorthand.
+  // The --quiet flag must be passed in its long form.
   const useQuiet = cfgBoolean(config.quiet) !== false; // default true
   const args: string[] = ["chat", "-q", prompt];
-  if (useQuiet) args.push("-Q");
+  if (useQuiet) args.push("--quiet");
 
   if (model) {
     args.push("-m", model);
