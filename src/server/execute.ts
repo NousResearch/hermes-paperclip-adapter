@@ -18,6 +18,9 @@
  *   --source           session source tag for filtering
  */
 
+import os from "os";
+import path from "path";
+
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -316,6 +319,7 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
+  const hermesHome = cfgString(config.hermesHome);
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
@@ -424,6 +428,9 @@ export async function execute(
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
   }
+
+  if (hermesHome) env.HERMES_HOME = hermesHome;
+  else if (!env.HERMES_HOME) env.HERMES_HOME = path.join(os.homedir(), ".hermes");
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =

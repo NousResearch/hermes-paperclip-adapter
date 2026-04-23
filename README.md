@@ -132,6 +132,7 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `hermesCommand` | string | `hermes` | Custom CLI binary path |
+| `hermesHome` | string | `$HERMES_HOME` or `~/.hermes` | Hermes home directory override; sets `HERMES_HOME` env var on the spawned subprocess so config, state, sessions, and credentials are isolated per adapter instance |
 | `verbose` | boolean | `false` | Enable verbose output |
 | `quiet` | boolean | `true` | Quiet mode (clean output, no banner/spinner) |
 | `extraArgs` | string[] | `[]` | Additional CLI arguments |
