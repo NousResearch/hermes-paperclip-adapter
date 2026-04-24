@@ -21,23 +21,46 @@ export const DEFAULT_GRACE_SEC = 10;
 export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
 
 /**
- * Valid --provider choices for the hermes CLI.
+ * Provider names that can be passed directly to `hermes chat --provider`.
  * Must stay in sync with `hermes chat --help`.
  */
-export const VALID_PROVIDERS = [
+export const CLI_FLAG_PROVIDERS = [
   "auto",
   "openrouter",
   "nous",
   "openai-codex",
-  "copilot",
   "copilot-acp",
+  "copilot",
   "anthropic",
+  "gemini",
+  "xai",
+  "ollama-cloud",
   "huggingface",
   "zai",
   "kimi-coding",
+  "kimi-coding-cn",
+  "stepfun",
   "minimax",
   "minimax-cn",
   "kilocode",
+  "xiaomi",
+  "arcee",
+  "nvidia",
+] as const;
+
+/**
+ * Provider names accepted in adapterConfig but applied through Hermes env vars
+ * instead of `--provider` because the current Hermes CLI parser does not expose
+ * them as flag choices.
+ */
+export const ENV_ONLY_PROVIDERS = [
+  "opencode-go",
+] as const;
+
+/** Valid provider choices accepted by adapterConfig. */
+export const VALID_PROVIDERS = [
+  ...CLI_FLAG_PROVIDERS,
+  ...ENV_ONLY_PROVIDERS,
 ] as const;
 
 /**

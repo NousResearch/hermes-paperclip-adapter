@@ -36,7 +36,7 @@ import {
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
-  VALID_PROVIDERS,
+  CLI_FLAG_PROVIDERS,
 } from "../shared/constants.js";
 
 import {
@@ -317,6 +317,8 @@ export async function execute(
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
   const model = cfgString(config.model) || DEFAULT_MODEL;
+  const baseUrl = cfgString(config.baseUrl) || cfgString(config.base_url);
+  const apiMode = cfgString(config.apiMode) || cfgString(config.api_mode);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -363,13 +365,17 @@ export async function execute(
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  if (model) {
+  const providerUsesCliFlag = (CLI_FLAG_PROVIDERS as readonly string[]).includes(resolvedProvider);
+
+  if (model && providerUsesCliFlag) {
     args.push("-m", model);
   }
 
-  // Always pass --provider when we have a resolved one (not "auto").
-  // "auto" means Hermes will decide on its own — no need to pass it.
-  if (resolvedProvider !== "auto") {
+  // Pass --provider only for providers accepted by Hermes's argparse choices.
+  // Env-only providers such as opencode-go are applied below through
+  // HERMES_INFERENCE_PROVIDER/HERMES_MODEL instead, otherwise Hermes exits
+  // before it can read the environment override.
+  if (resolvedProvider !== "auto" && providerUsesCliFlag) {
     args.push("--provider", resolvedProvider);
   }
 
@@ -423,6 +429,13 @@ export async function execute(
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
+  }
+
+  if (!providerUsesCliFlag && resolvedProvider !== "auto") {
+    env.HERMES_INFERENCE_PROVIDER = resolvedProvider;
+    if (model) env.HERMES_MODEL = model;
+    if (baseUrl) env.HERMES_BASE_URL = baseUrl;
+    if (apiMode) env.HERMES_API_MODE = apiMode;
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
