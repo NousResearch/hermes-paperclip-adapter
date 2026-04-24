@@ -37,8 +37,9 @@ export function buildHermesConfig(
   //   2. ~/.hermes/config.yaml detection
   //   3. Model-name prefix inference
   //   4. "auto" fallback
-  // This ensures correct provider routing even for agents created
-  // before provider tracking existed.
+  // Explicit providers such as opencode-go are preserved; env-only providers
+  // are exported through Hermes environment variables at runtime instead of
+  // being passed as unsupported CLI --provider choices.
 
   // Execution limits — let the user configure these from the Paperclip UI.
   // timeoutSec: wall-clock kill timeout for the hermes child process.

@@ -107,7 +107,7 @@ Create issues in Paperclip and assign them to your Hermes agent. On each heartbe
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | string | `anthropic/claude-sonnet-4` | Model in `provider/model` format |
-| `provider` | string | *(auto-detected)* | API provider: `auto`, `openrouter`, `nous`, `openai-codex`, `zai`, `kimi-coding`, `minimax`, `minimax-cn` |
+| `provider` | string | *(auto-detected)* | API provider: `auto`, `openrouter`, `nous`, `openai-codex`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `opencode-go`, etc. Explicit values in `adapterConfig.provider` take precedence over model-name inference. |
 | `timeoutSec` | number | `300` | Execution timeout in seconds |
 | `graceSec` | number | `10` | Grace period before SIGKILL |
 
@@ -132,6 +132,8 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `hermesCommand` | string | `hermes` | Custom CLI binary path |
+| `baseUrl` / `base_url` | string | *(unset)* | Base URL override for env-only providers such as `opencode-go`; exported to Hermes as `HERMES_BASE_URL`. |
+| `apiMode` / `api_mode` | string | *(unset)* | API mode override for env-only providers; exported as `HERMES_API_MODE`. |
 | `verbose` | boolean | `false` | Enable verbose output |
 | `quiet` | boolean | `true` | Quiet mode (clean output, no banner/spinner) |
 | `extraArgs` | string[] | `[]` | Additional CLI arguments |
@@ -163,6 +165,29 @@ Conditional sections:
 - `{{#taskId}}...{{/taskId}}` — included only when a task is assigned
 - `{{#noTask}}...{{/noTask}}` — included only when no task (heartbeat check)
 - `{{#commentId}}...{{/commentId}}` — included only when woken by a comment
+
+## Env-only provider example
+
+Some Hermes providers are configured through environment variables rather than
+`hermes chat --provider` choices. For example, OpenCode Go can be configured
+explicitly without being overwritten by Kimi/MiniMax model-name inference:
+
+```json
+{
+  "adapterType": "hermes_local",
+  "adapterConfig": {
+    "model": "kimi-k2.6",
+    "provider": "opencode-go",
+    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "apiMode": "chat_completions"
+  }
+}
+```
+
+For `provider: "opencode-go"`, the adapter exports
+`HERMES_INFERENCE_PROVIDER`, `HERMES_MODEL`, `HERMES_BASE_URL`, and
+`HERMES_API_MODE` instead of passing an unsupported `--provider opencode-go`
+flag to the Hermes CLI.
 
 ## Architecture
 

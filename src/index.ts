@@ -42,7 +42,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | model | string | (Hermes configured default) | Optional explicit model in provider/model format. Leave blank to use Hermes's configured default model. |
-| provider | string | (auto) | API provider: auto, openrouter, nous, openai-codex, zai, kimi-coding, minimax, minimax-cn. Usually not needed — Hermes auto-detects from model name. |
+| provider | string | (auto) | API provider: auto, openrouter, nous, openai-codex, zai, kimi-coding, kimi-coding-cn, minimax, minimax-cn, opencode-go. Explicit adapterConfig values take precedence over model-name inference. |
 | timeoutSec | number | 300 | Execution timeout in seconds |
 | graceSec | number | 10 | Grace period after SIGTERM before SIGKILL |
 
@@ -65,6 +65,8 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | hermesCommand | string | hermes | Path to hermes CLI binary |
+| baseUrl / base_url | string | (unset) | Base URL override for env-only providers such as opencode-go |
+| apiMode / api_mode | string | (unset) | API mode override for env-only providers |
 | verbose | boolean | false | Enable verbose output |
 | extraArgs | string[] | [] | Additional CLI arguments |
 | env | object | {} | Extra environment variables |
