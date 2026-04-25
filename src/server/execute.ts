@@ -43,6 +43,7 @@ import {
   detectModel,
   resolveProvider,
 } from "./detect-model.js";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -61,6 +62,42 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+function extractProfileFromArgs(v: string[] | undefined): string | undefined {
+  if (!v?.length) return undefined;
+
+  for (let i = 0; i < v.length; i += 1) {
+    const arg = v[i];
+    const profilePairMatch = arg.match(/^(--profile|-p)\s+(.+)$/);
+    if (profilePairMatch) {
+      return profilePairMatch[2].trim() || undefined;
+    }
+
+    if (arg === "--profile" || arg === "-p") {
+      const next = v[i + 1];
+      return typeof next === "string" && next.length > 0 ? next : undefined;
+    }
+
+    if (arg.startsWith("--profile=") || arg.startsWith("-p=")) {
+      const [, value = ""] = arg.split("=", 2);
+      return value || undefined;
+    }
+  }
+
+  return undefined;
+}
+function cfgEnvString(v: unknown): string | undefined {
+  if (typeof v === "string" && v.length > 0) return v;
+  if (
+    v &&
+    typeof v === "object" &&
+    "value" in v &&
+    typeof (v as { value?: unknown }).value === "string" &&
+    (v as { value: string }).value.length > 0
+  ) {
+    return (v as { value: string }).value;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -316,15 +353,20 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
+  const profile = extractProfileFromArgs(extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
+  const userEnv = config.env as Record<string, unknown> | undefined;
+  const configuredHermesHome =
+    userEnv && typeof userEnv === "object"
+      ? cfgEnvString(userEnv.HERMES_HOME)
+      : undefined;
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
@@ -338,15 +380,21 @@ export async function execute(
   // correct provider is still used.
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
+  const detectConfigPath = configuredHermesHome
+    ? profile
+      ? join(configuredHermesHome, "profiles", profile, "config.yaml")
+      : join(configuredHermesHome, "config.yaml")
+    : undefined;
 
-  if (!explicitProvider) {
+  if (!explicitProvider || !cfgString(config.model)) {
     try {
-      detectedConfig = await detectModel();
+      detectedConfig = await detectModel(detectConfigPath);
     } catch {
       // Non-fatal — detection failure shouldn't block execution
     }
   }
 
+  const model = cfgString(config.model) || detectedConfig?.model || DEFAULT_MODEL;
   const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
     explicitProvider,
     detectedProvider: detectedConfig?.provider,
@@ -420,7 +468,6 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
   }
