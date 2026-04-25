@@ -62,6 +62,19 @@ function cfgStringArray(v: unknown): string[] | undefined {
     ? (v as string[])
     : undefined;
 }
+function cfgEnvString(v: unknown): string | undefined {
+  if (typeof v === "string" && v.length > 0) return v;
+  if (
+    v &&
+    typeof v === "object" &&
+    "value" in v &&
+    typeof (v as { value?: unknown }).value === "string" &&
+    (v as { value: string }).value.length > 0
+  ) {
+    return (v as { value: string }).value;
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Wake-up prompt builder
@@ -325,6 +338,7 @@ export async function execute(
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
+  const userEnv = config.env as Record<string, unknown> | undefined;
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
@@ -415,14 +429,24 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
-    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
+  const hasExplicitApiKey =
+    typeof env.PAPERCLIP_API_KEY === "string" &&
+    env.PAPERCLIP_API_KEY.trim().length > 0;
+  if (
+    !hasExplicitApiKey &&
+    typeof (ctx as AdapterExecutionContext & { authToken?: unknown }).authToken === "string" &&
+    (ctx as AdapterExecutionContext & { authToken: string }).authToken.trim().length > 0
+  ) {
+    env.PAPERCLIP_API_KEY = (ctx as AdapterExecutionContext & { authToken: string }).authToken;
+  }
 
-  const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    for (const [key, value] of Object.entries(userEnv)) {
+      const resolved = cfgEnvString(value);
+      if (resolved !== undefined) env[key] = resolved;
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
