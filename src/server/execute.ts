@@ -198,6 +198,33 @@ const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 /** Regex for legacy session output format */
 const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 
+/** Tokens that are known to be words from Hermes help/error text, not real session IDs. */
+const INVALID_SESSION_ID_TOKENS = new Set([
+  "from",
+  "previous",
+  "cli",
+  "run",
+  "use",
+  "session",
+  "not",
+  "found",
+  "null",
+  "undefined",
+]);
+
+/** Normalize and validate a Hermes session ID before persisting or resuming. */
+function normalizeSessionId(value: unknown): string | null {
+  const sessionId = typeof value === "string" ? value.trim() : "";
+  if (!sessionId) return null;
+  if (INVALID_SESSION_ID_TOKENS.has(sessionId.toLowerCase())) return null;
+
+  // Real Hermes session IDs observed locally look like 20260425_104359_25e581.
+  // UUID-style IDs are also allowed. Short English words from error text are rejected.
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{7,}$/.test(sessionId)) return null;
+
+  return sessionId;
+}
+
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -255,8 +282,9 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   //
   //   session_id: <id>
   const sessionMatch = stdout.match(SESSION_ID_REGEX);
-  if (sessionMatch?.[1]) {
-    result.sessionId = sessionMatch?.[1] ?? null;
+  const quietSessionId = normalizeSessionId(sessionMatch?.[1]);
+  if (quietSessionId) {
+    result.sessionId = quietSessionId;
     // The response is everything before the session_id line
     const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
     if (sessionLineIdx > 0) {
@@ -265,8 +293,9 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   } else {
     // Legacy format (non-quiet mode)
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    const legacySessionId = normalizeSessionId(legacyMatch?.[1]);
+    if (legacySessionId) {
+      result.sessionId = legacySessionId;
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -397,7 +426,7 @@ export async function execute(
   args.push("--yolo");
 
   // Session resume
-  const prevSessionId = cfgString(
+  const prevSessionId = normalizeSessionId(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
   if (persistSession && prevSessionId) {
