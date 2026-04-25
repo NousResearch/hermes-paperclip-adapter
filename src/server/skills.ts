@@ -22,13 +22,23 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function cfgEnvValue(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return cfgEnvValue((value as Record<string, unknown>).value);
+  }
+  return null;
+}
+
 function resolveHermesHome(config: Record<string, unknown>): string {
   const env =
     typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
       ? (config.env as Record<string, unknown>)
       : {};
-  const configuredHome = asString(env.HOME);
-  return configuredHome ? path.resolve(configuredHome) : os.homedir();
+  const configuredHermesHome = cfgEnvValue(env.HERMES_HOME);
+  if (configuredHermesHome) return path.resolve(configuredHermesHome);
+  const configuredHome = cfgEnvValue(env.HOME);
+  return configuredHome ? path.resolve(configuredHome, ".hermes") : path.join(os.homedir(), ".hermes");
 }
 
 interface SkillFrontmatter {
@@ -128,7 +138,7 @@ async function buildSkillEntry(
 
 async function buildHermesSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
   const home = resolveHermesHome(config);
-  const hermesSkillsHome = path.join(home, ".hermes", "skills");
+  const hermesSkillsHome = path.join(home, "skills");
 
   // 1. Scan Paperclip-managed skills (bundled with the adapter)
   const paperclipEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
