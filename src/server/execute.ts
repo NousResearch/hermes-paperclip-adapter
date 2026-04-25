@@ -59,8 +59,31 @@ function cfgBoolean(v: unknown): boolean | undefined {
 }
 function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
-    ? (v as string[])
+    ? v
     : undefined;
+}
+
+function cfgEnvValue(v: unknown): string | undefined {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const record = v as Record<string, unknown>;
+    // Paperclip stores env bindings as { type: "plain" | "secret", value: "..." }.
+    // The Hermes adapter must pass the resolved value to child_process.env, not
+    // the binding object itself; otherwise spawned agents see missing/invalid env vars.
+    return cfgEnvValue(record.value);
+  }
+  return undefined;
+}
+
+function cfgEnvRecord(v: unknown): Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(v as Record<string, unknown>)) {
+    const resolved = cfgEnvValue(value);
+    if (resolved !== undefined) out[key] = resolved;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,26 +106,38 @@ Issue ID: {{taskId}}
 Title: {{taskTitle}}
 
 {{taskBody}}
-
-## Workflow
-
-1. Work on the task using your tools
-2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
-3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
-4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
 {{#commentId}}
-## Comment on This Issue
+## Latest Comment Wake — Reply First
 
-Someone commented. Read it:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
+Wake reason: {{wakeReason}}
+Latest comment ID: {{commentId}}
 
-Address the comment, POST a reply if needed, then continue working.
+{{paperclipWakeSummary}}
+
+IMPORTANT: A human/agent comment triggered this run. Your first priority is to answer the latest comment directly in the issue conversation. Do NOT redo the original issue work unless the latest comment explicitly asks you to. Read the full issue thread before deciding what to do:
+   Fetch: GET {{paperclipApiUrl}}/issues/{{taskId}}/comments (include the Paperclip Authorization bearer token).
+You can fetch the latest comment directly with:
+   Fetch: GET {{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}} (include the Paperclip Authorization bearer token).
+
+If the comment is a question, post a concise answer as a comment. If no code/task change is requested, do not make changes. After replying, mark the issue done only if the comment has been fully answered.
 {{/commentId}}
+
+{{#taskId}}
+## Workflow
+
+1. Read the current issue details AND the comment thread before acting:
+   Fetch: GET {{paperclipApiUrl}}/issues/{{taskId}} (include the Paperclip Authorization bearer token).
+   Fetch: GET {{paperclipApiUrl}}/issues/{{taskId}}/comments (include the Paperclip Authorization bearer token).
+2. Work on the task using your tools, but avoid repeating already-completed work from earlier comments.
+3. When done, mark the issue as completed:
+   PATCH {{paperclipApiUrl}}/issues/{{taskId}} with JSON {"status":"done"} (include the Paperclip Authorization bearer token).
+4. Post a completion/reply comment on the issue summarizing what you did or answering the latest question:
+   POST {{paperclipApiUrl}}/issues/{{taskId}}/comments with JSON {"body":"DONE: <your summary or answer here>"} (include the Paperclip Authorization bearer token).
+5. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
+   POST {{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments with JSON {"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"} (include the Paperclip Authorization bearer token).
+{{/taskId}}
 
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
@@ -123,20 +158,82 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function summarizePaperclipWake(wake: Record<string, unknown> | null): string {
+  if (!wake) return "";
+
+  const lines: string[] = [];
+  const reason = cfgString(wake.reason);
+  if (reason) lines.push(`Wake payload reason: ${reason}`);
+
+  const issue = asRecord(wake.issue);
+  const identifier = cfgString(issue.identifier);
+  const title = cfgString(issue.title);
+  if (identifier || title) lines.push(`Wake issue: ${identifier || ""} ${title || ""}`.trim());
+
+  const comments = Array.isArray(wake.comments) ? wake.comments : [];
+  if (comments.length > 0) {
+    lines.push("Inline wake comments from Paperclip:");
+    for (const rawComment of comments) {
+      const comment = asRecord(rawComment);
+      const id = cfgString(comment.id) || "unknown-comment";
+      const author = asRecord(comment.author);
+      const authorType = cfgString(author.type) || "unknown";
+      const authorId = cfgString(author.id) || "unknown";
+      const body = cfgString(comment.body) || "";
+      lines.push(`- ${id} by ${authorType}:${authorId}: ${body}`);
+    }
+  }
+
+  if (wake.fallbackFetchNeeded === true) {
+    lines.push("Paperclip says the inline comment window was truncated or incomplete; fetch the full comments endpoint before acting.");
+  }
+
+  return lines.join("\n");
+}
+
 function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const context = asRecord((ctx as AdapterExecutionContext & { context?: unknown }).context);
+  const paperclipWakeRaw = asRecord(context.paperclipWake);
+  const paperclipWake = Object.keys(paperclipWakeRaw).length > 0 ? paperclipWakeRaw : null;
+  const wakeIssue = paperclipWake ? asRecord(paperclipWake.issue) : {};
+
+  const taskId =
+    cfgString(ctx.config?.taskId) ||
+    cfgString(context.taskId) ||
+    cfgString(context.issueId) ||
+    cfgString(wakeIssue.id);
+  const taskTitle =
+    cfgString(ctx.config?.taskTitle) ||
+    cfgString(context.taskTitle) ||
+    cfgString(wakeIssue.title) ||
+    "";
+  const taskBody = cfgString(ctx.config?.taskBody) || cfgString(context.taskBody) || "";
+  const commentId =
+    cfgString(ctx.config?.commentId) ||
+    cfgString(context.commentId) ||
+    cfgString(context.wakeCommentId) ||
+    cfgString(paperclipWake?.latestCommentId) ||
+    "";
+  const wakeReason =
+    cfgString(ctx.config?.wakeReason) ||
+    cfgString(context.wakeReason) ||
+    cfgString(paperclipWake?.reason) ||
+    "";
+  const paperclipWakeSummary = summarizePaperclipWake(paperclipWake);
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = cfgString(ctx.config?.companyName) || cfgString(context.companyName) || "";
+  const projectName = cfgString(ctx.config?.projectName) || cfgString(context.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -159,6 +256,7 @@ function buildPrompt(
     taskBody,
     commentId,
     wakeReason,
+    paperclipWakeSummary,
     projectName,
     paperclipApiUrl,
   };
@@ -420,10 +518,7 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
-  }
+  Object.assign(env, cfgEnvRecord(config.env));
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
