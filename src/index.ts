@@ -51,16 +51,46 @@ async function fetchOpenAIModels(
   }
 }
 
+function addConfiguredModel(modelsById: Map<string, string>, model: string | undefined): void {
+  const id = model?.trim();
+  if (!id) return;
+  if (!modelsById.has(id)) modelsById.set(id, id);
+}
+
+function extractConfiguredModels(content: string): Map<string, string> {
+  const modelsById = new Map<string, string>();
+
+  const modelSection = content.match(/^model:\s*\n((?:[ \t][^\n]*\n)*)/m)?.[1] ?? "";
+  addConfiguredModel(modelsById, modelSection.match(/^\s+default:\s*(\S+)/m)?.[1]);
+
+  const cpSection =
+    content.match(/^custom_providers:\s*\n((?:[ \t]+-[^\n]*\n(?:[ \t][^\n]*\n)*)*)/m)?.[1] ?? "";
+  for (const block of cpSection.split(/(?=^\s+-\s)/m).filter(Boolean)) {
+    addConfiguredModel(modelsById, block.match(/^\s+model:\s*(\S+)/m)?.[1]);
+    for (const modelMatch of block.matchAll(/^\s{4}([A-Za-z0-9._:/-]+):\s*$/gm)) {
+      addConfiguredModel(modelsById, modelMatch[1]);
+    }
+  }
+
+  const provSection = content.match(/^providers:\s*\n((?:[ \t][^\n]*\n)*)/m)?.[1] ?? "";
+  for (const match of provSection.matchAll(/^\s+default_model:\s*(\S+)/gm)) {
+    addConfiguredModel(modelsById, match[1]);
+  }
+
+  return modelsById;
+}
+
 /**
  * List all models available from the user's Hermes config.
  *
  * Reads `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`), extracts
- * unique `base_url` + `api_key` pairs from the `custom_providers` list and
- * `providers` map, probes each endpoint's `/v1/models` in parallel, and
- * returns the deduplicated, sorted result.
+ * configured model ids plus unique `base_url` + credential pairs from the
+ * `custom_providers` list and `providers` map, probes each endpoint's
+ * `/v1/models` in parallel, and returns the deduplicated, sorted result.
  *
- * Falls back gracefully to an empty list if the config is missing or any
- * endpoint is unreachable.
+ * Falls back gracefully to configured model ids if the config uses `key_env`
+ * credentials that are not available to the Paperclip process or an endpoint is
+ * unreachable.
  */
 export async function listModels(): Promise<{ id: string; label: string }[]> {
   const hermesHome = process.env["HERMES_HOME"] ?? join(homedir(), ".hermes");
@@ -72,49 +102,53 @@ export async function listModels(): Promise<{ id: string; label: string }[]> {
     return [];
   }
 
-  // Extract unique (base_url, api_key) pairs via lightweight regex parsing.
+  const modelsById = extractConfiguredModels(content);
+
+  // Extract unique (base_url, credential) pairs via lightweight regex parsing.
   // Covers both the `custom_providers:` list and the `providers:` map.
   const endpoints = new Map<string, string>(); // url -> api_key
 
-  // custom_providers: list of {name, base_url, model, api_key?}
+  // custom_providers: list of {name, base_url, model, api_key?, key_env?}
   const cpSection =
     content.match(/^custom_providers:\s*\n((?:[ \t]+-[^\n]*\n(?:[ \t][^\n]*\n)*)*)/m)?.[1] ?? "";
   for (const block of cpSection.split(/(?=^\s+-\s)/m).filter(Boolean)) {
     const url = (block.match(/base_url:\s*(\S+)/) ?? block.match(/url:\s*(\S+)/))?.[1]?.trim();
-    const key = block.match(/api_key:\s*(\S+)/)?.[1]?.trim() ?? "";
+    const key =
+      block.match(/api_key:\s*(\S+)/)?.[1]?.trim() ??
+      process.env[block.match(/key_env:\s*(\S+)/)?.[1]?.trim() ?? ""] ??
+      "";
     if (url) {
       // Add URL, or upgrade an existing keyless entry with a key we now have
       if (!endpoints.has(url) || (!endpoints.get(url) && key)) endpoints.set(url, key);
     }
   }
 
-  // providers: map of name -> {api, api_key, default_model}
+  // providers: map of name -> {api, api_key?, key_env?, default_model}
   const provSection = content.match(/^providers:\s*\n((?:[ \t][^\n]*\n)*)/m)?.[1] ?? "";
   const apiMatches = [...provSection.matchAll(/^\s+api:\s*(\S+)/gm)];
   const keyMatches = [...provSection.matchAll(/^\s+api_key:\s*(\S+)/gm)];
+  const keyEnvMatches = [...provSection.matchAll(/^\s+key_env:\s*(\S+)/gm)];
   for (let i = 0; i < apiMatches.length; i++) {
     const url = apiMatches[i]?.[1]?.trim();
-    const key = keyMatches[i]?.[1]?.trim() ?? "";
+    const key =
+      keyMatches[i]?.[1]?.trim() ??
+      process.env[keyEnvMatches[i]?.[1]?.trim() ?? ""] ??
+      "";
     if (url && (!endpoints.has(url) || (!endpoints.get(url) && key))) endpoints.set(url, key);
   }
-
-  if (endpoints.size === 0) return [];
 
   const fetched = await Promise.all(
     [...endpoints.entries()].map(([url, key]) => fetchOpenAIModels(url, key)),
   );
 
-  const seen = new Set<string>();
-  const results: { id: string; label: string }[] = [];
   for (const batch of fetched) {
     for (const m of batch) {
-      if (!seen.has(m.id)) {
-        seen.add(m.id);
-        results.push(m);
-      }
+      if (!modelsById.has(m.id)) modelsById.set(m.id, m.label);
     }
   }
-  return results.sort((a, b) => a.id.localeCompare(b.id));
+  return [...modelsById.entries()]
+    .map(([id, label]) => ({ id, label }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /**
