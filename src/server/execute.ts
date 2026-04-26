@@ -44,6 +44,11 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -61,6 +66,70 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+type DynamicOpenRouterModelSelection = {
+  model: string;
+  role?: string;
+  source?: string;
+  free_model_count?: number;
+  [key: string]: unknown;
+};
+
+const DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL = "minimax/minimax-m2.5:free";
+
+function inferOpenRouterRole(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+): string {
+  const configured = cfgString(config.openrouterRole) || cfgString(config.roleKey);
+  if (configured) return configured;
+
+  const name = String(ctx.agent?.name || "").toLowerCase();
+  if (name.includes("research")) return "researcher";
+  if (name.includes("analytic")) return "analytics";
+  if (name.includes("engineer")) return "engineer";
+  if (name === "qa" || name.includes("qa")) return "qa";
+  if (name.includes("writer")) return "writer";
+  if (name.includes("market")) return "marketer";
+  if (name.includes("sales")) return "sales";
+  if (name.includes("support")) return "support";
+  if (name.includes("youtube") || name.includes("video")) return "youtube";
+  return "default";
+}
+
+async function resolveDynamicOpenRouterModel(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+  currentModel: string,
+): Promise<DynamicOpenRouterModelSelection> {
+  const selector =
+    cfgString(config.openrouterModelSelector) ||
+    "/mnt/d/AiMe/scripts/paperclip_select_openrouter_free_model.py";
+  const role = inferOpenRouterRole(ctx, config);
+  const maxAgeHours = String(cfgNumber(config.dynamicFreeModelMaxAgeHours) || 6);
+  const { stdout } = await execFileAsync(
+    selector,
+    [
+      "--role",
+      role,
+      "--current",
+      currentModel,
+      "--max-age-hours",
+      maxAgeHours,
+      "--json",
+    ],
+    {
+      timeout: 150000,
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  const parsed = JSON.parse(stdout) as DynamicOpenRouterModelSelection;
+  const model = typeof parsed.model === "string" ? parsed.model.trim() : "";
+  if (!model) {
+    throw new Error("OpenRouter selector returned no model");
+  }
+  return { ...parsed, model };
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +385,7 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  let model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -338,6 +407,19 @@ export async function execute(
   // correct provider is still used.
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
+  let dynamicOpenRouterModel: DynamicOpenRouterModelSelection | null = null;
+
+  if (explicitProvider === "openrouter" && cfgBoolean(config.dynamicFreeModel) !== false) {
+    try {
+      dynamicOpenRouterModel = await resolveDynamicOpenRouterModel(ctx, config, model);
+      model = dynamicOpenRouterModel.model;
+    } catch (err) {
+      await ctx.onLog(
+        "stderr",
+        `[hermes] OpenRouter dynamic model selection failed; using configured model ${model}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
 
   if (!explicitProvider) {
     try {
@@ -445,6 +527,12 @@ export async function execute(
       `[hermes] Resuming session: ${prevSessionId}\n`,
     );
   }
+  if (dynamicOpenRouterModel) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] OpenRouter free model selected (role=${dynamicOpenRouterModel.role ?? "default"}, model=${dynamicOpenRouterModel.model}, source=${dynamicOpenRouterModel.source ?? "unknown"}, free_models=${dynamicOpenRouterModel.free_model_count ?? "unknown"})\n`,
+    );
+  }
 
   // ── Execute ────────────────────────────────────────────────────────────
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
@@ -470,13 +558,48 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
+  let result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,
   });
+
+  const dynamicOpenRouterFallbackModel =
+    cfgString(config.dynamicFreeModelFallbackModel) ||
+    DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL;
+  if (
+    dynamicOpenRouterModel &&
+    model !== dynamicOpenRouterFallbackModel &&
+    (result.timedOut || (result.exitCode !== null && result.exitCode !== 0))
+  ) {
+    const retryArgs = [...args];
+    const modelArgIndex = retryArgs.indexOf("-m");
+    if (modelArgIndex >= 0 && retryArgs[modelArgIndex + 1]) {
+      retryArgs[modelArgIndex + 1] = dynamicOpenRouterFallbackModel;
+    } else {
+      retryArgs.push("-m", dynamicOpenRouterFallbackModel);
+    }
+
+    await ctx.onLog(
+      "stdout",
+      `[hermes] OpenRouter model ${model} failed or timed out; retrying once with ${dynamicOpenRouterFallbackModel}\n`,
+    );
+    model = dynamicOpenRouterFallbackModel;
+    dynamicOpenRouterModel = {
+      ...dynamicOpenRouterModel,
+      model,
+      source: "fallback-after-failure",
+    };
+    result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+    });
+  }
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
@@ -521,6 +644,7 @@ export async function execute(
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
+    dynamic_openrouter_model: dynamicOpenRouterModel,
   };
 
   // Store session ID for next run
