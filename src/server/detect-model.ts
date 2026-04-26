@@ -1,8 +1,8 @@
 /**
  * Detect the current model and provider from the user's Hermes config.
  *
- * Reads ~/.hermes/config.yaml and extracts the default model,
- * provider, base_url, and api_mode settings.
+ * Reads $HERMES_HOME/config.yaml or ~/.hermes/config.yaml and extracts the
+ * default model, provider, base_url, and api_mode settings.
  *
  * Also provides provider resolution logic that merges explicit config,
  * Hermes config detection, and model-name prefix inference.
@@ -32,7 +32,8 @@ export interface DetectedModel {
 export async function detectModel(
   configPath?: string,
 ): Promise<DetectedModel | null> {
-  const filePath = configPath ?? join(homedir(), ".hermes", "config.yaml");
+  const hermesHome = process.env["HERMES_HOME"]?.trim() || join(homedir(), ".hermes");
+  const filePath = configPath ?? join(hermesHome, "config.yaml");
 
   let content: string;
   try {
