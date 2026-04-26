@@ -51,30 +51,111 @@ async function fetchOpenAIModels(
   }
 }
 
+function parseYamlScalar(raw: string | undefined): string | undefined {
+  let value = raw?.trim();
+  if (!value) return undefined;
+
+  const quoted = value.match(/^(['"])(.*)\1\s*(?:#.*)?$/);
+  if (quoted) return quoted[2];
+
+  value = value.replace(/\s+#.*$/, "").trim();
+  return value || undefined;
+}
+
+function extractIndentedSection(content: string, sectionName: string): string {
+  const lines = content.split("\n");
+  const start = lines.findIndex((line) =>
+    new RegExp(`^${sectionName}:\\s*(?:#.*)?$`).test(line),
+  );
+  if (start === -1) return "";
+
+  const sectionLines: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const trimmed = line.trimStart();
+    const indent = line.length - trimmed.length;
+    if (indent === 0 && trimmed && !trimmed.startsWith("#") && !trimmed.startsWith("-")) break;
+    sectionLines.push(line);
+  }
+  return sectionLines.join("\n");
+}
+
+function readScalar(block: string, key: string): string | undefined {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return parseYamlScalar(block.match(new RegExp(`^\\s+${escaped}:\\s*(.*)$`, "m"))?.[1]);
+}
+
+function resolveKey(rawKey: string | undefined): string {
+  const inlineKey = parseYamlScalar(rawKey);
+  return inlineKey ?? "";
+}
+
+function resolveKeyEnv(rawEnvName: string | undefined): string {
+  const envName = parseYamlScalar(rawEnvName);
+  return envName ? (process.env[envName] ?? "") : "";
+}
+
+function normalizeEndpoint(rawUrl: string | undefined): string | undefined {
+  const url = parseYamlScalar(rawUrl)?.replace(/\/+$/, "");
+  return url || undefined;
+}
+
+function addEndpoint(endpoints: Map<string, string>, rawUrl: string | undefined, key: string): void {
+  const url = normalizeEndpoint(rawUrl);
+  if (!url) return;
+  if (!endpoints.has(url) || (!endpoints.get(url) && key)) endpoints.set(url, key);
+}
+
 function addConfiguredModel(modelsById: Map<string, string>, model: string | undefined): void {
-  const id = model?.trim();
+  const id = parseYamlScalar(model);
   if (!id) return;
   if (!modelsById.has(id)) modelsById.set(id, id);
+}
+
+function extractCustomProviderModelKeys(block: string): string[] {
+  const lines = block.split("\n");
+  let modelsIndent: number | null = null;
+  let modelKeyIndent: number | null = null;
+  const modelKeys: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const indent = line.length - line.trimStart().length;
+    if (modelsIndent === null) {
+      if (/^models:\s*(?:#.*)?$/.test(trimmed)) modelsIndent = indent;
+      continue;
+    }
+
+    if (indent <= modelsIndent) break;
+
+    const match = line.match(/^\s*([^:#][^:]*):\s*(?:#.*)?$/);
+    if (!match) continue;
+    if (modelKeyIndent === null) modelKeyIndent = indent;
+    if (indent !== modelKeyIndent) continue;
+
+    const key = parseYamlScalar(match[1]);
+    if (key) modelKeys.push(key);
+  }
+
+  return modelKeys;
 }
 
 function extractConfiguredModels(content: string): Map<string, string> {
   const modelsById = new Map<string, string>();
 
-  const modelSection = content.match(/^model:\s*\n((?:[ \t][^\n]*\n)*)/m)?.[1] ?? "";
-  addConfiguredModel(modelsById, modelSection.match(/^\s+default:\s*(\S+)/m)?.[1]);
+  const modelSection = extractIndentedSection(content, "model");
+  addConfiguredModel(modelsById, readScalar(modelSection, "default"));
 
-  const cpSection =
-    content.match(/^custom_providers:\s*\n((?:[ \t]+-[^\n]*\n(?:[ \t][^\n]*\n)*)*)/m)?.[1] ?? "";
+  const cpSection = extractIndentedSection(content, "custom_providers");
   for (const block of cpSection.split(/(?=^\s+-\s)/m).filter(Boolean)) {
-    addConfiguredModel(modelsById, block.match(/^\s+model:\s*(\S+)/m)?.[1]);
-    for (const modelMatch of block.matchAll(/^\s{4}([A-Za-z0-9._:/-]+):\s*$/gm)) {
-      addConfiguredModel(modelsById, modelMatch[1]);
-    }
+    addConfiguredModel(modelsById, readScalar(block, "model"));
+    for (const modelKey of extractCustomProviderModelKeys(block)) addConfiguredModel(modelsById, modelKey);
   }
 
-  const provSection = content.match(/^providers:\s*\n((?:[ \t][^\n]*\n)*)/m)?.[1] ?? "";
-  for (const match of provSection.matchAll(/^\s+default_model:\s*(\S+)/gm)) {
-    addConfiguredModel(modelsById, match[1]);
+  const provSection = extractIndentedSection(content, "providers");
+  for (const block of provSection.split(/(?=^[ \t]{2}[^ \t:#][^:]*:\s*(?:#.*)?$)/m).filter(Boolean)) {
+    addConfiguredModel(modelsById, readScalar(block, "default_model"));
   }
 
   return modelsById;
@@ -93,7 +174,7 @@ function extractConfiguredModels(content: string): Map<string, string> {
  * unreachable.
  */
 export async function listModels(): Promise<{ id: string; label: string }[]> {
-  const hermesHome = process.env["HERMES_HOME"] ?? join(homedir(), ".hermes");
+  const hermesHome = process.env["HERMES_HOME"]?.trim() || join(homedir(), ".hermes");
   const configPath = join(hermesHome, "config.yaml");
   let content: string;
   try {
@@ -109,32 +190,18 @@ export async function listModels(): Promise<{ id: string; label: string }[]> {
   const endpoints = new Map<string, string>(); // url -> api_key
 
   // custom_providers: list of {name, base_url, model, api_key?, key_env?}
-  const cpSection =
-    content.match(/^custom_providers:\s*\n((?:[ \t]+-[^\n]*\n(?:[ \t][^\n]*\n)*)*)/m)?.[1] ?? "";
+  const cpSection = extractIndentedSection(content, "custom_providers");
   for (const block of cpSection.split(/(?=^\s+-\s)/m).filter(Boolean)) {
-    const url = (block.match(/base_url:\s*(\S+)/) ?? block.match(/url:\s*(\S+)/))?.[1]?.trim();
-    const key =
-      block.match(/api_key:\s*(\S+)/)?.[1]?.trim() ??
-      process.env[block.match(/key_env:\s*(\S+)/)?.[1]?.trim() ?? ""] ??
-      "";
-    if (url) {
-      // Add URL, or upgrade an existing keyless entry with a key we now have
-      if (!endpoints.has(url) || (!endpoints.get(url) && key)) endpoints.set(url, key);
-    }
+    const url = readScalar(block, "base_url") ?? readScalar(block, "url");
+    const key = resolveKey(readScalar(block, "api_key")) || resolveKeyEnv(readScalar(block, "key_env"));
+    addEndpoint(endpoints, url, key);
   }
 
   // providers: map of name -> {api, api_key?, key_env?, default_model}
-  const provSection = content.match(/^providers:\s*\n((?:[ \t][^\n]*\n)*)/m)?.[1] ?? "";
-  const apiMatches = [...provSection.matchAll(/^\s+api:\s*(\S+)/gm)];
-  const keyMatches = [...provSection.matchAll(/^\s+api_key:\s*(\S+)/gm)];
-  const keyEnvMatches = [...provSection.matchAll(/^\s+key_env:\s*(\S+)/gm)];
-  for (let i = 0; i < apiMatches.length; i++) {
-    const url = apiMatches[i]?.[1]?.trim();
-    const key =
-      keyMatches[i]?.[1]?.trim() ??
-      process.env[keyEnvMatches[i]?.[1]?.trim() ?? ""] ??
-      "";
-    if (url && (!endpoints.has(url) || (!endpoints.get(url) && key))) endpoints.set(url, key);
+  const provSection = extractIndentedSection(content, "providers");
+  for (const block of provSection.split(/(?=^[ \t]{2}[^ \t:#][^:]*:\s*(?:#.*)?$)/m).filter(Boolean)) {
+    const key = resolveKey(readScalar(block, "api_key")) || resolveKeyEnv(readScalar(block, "key_env"));
+    addEndpoint(endpoints, readScalar(block, "api"), key);
   }
 
   const fetched = await Promise.all(
