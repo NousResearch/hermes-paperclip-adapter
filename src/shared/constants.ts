@@ -32,6 +32,7 @@ export const VALID_PROVIDERS = [
   "copilot",
   "copilot-acp",
   "anthropic",
+  "xai",
   "huggingface",
   "zai",
   "kimi-coding",
@@ -59,6 +60,8 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
   ["claude", "anthropic"],
   // Google models (via openrouter or direct)
   ["gemini", "auto"],
+  // xAI / Grok models
+  ["grok", "xai"],
   // Nous models
   ["hermes-", "nous"],
   // Z.AI / GLM models
