@@ -18,6 +18,12 @@ import { ADAPTER_TYPE, ADAPTER_LABEL } from "./shared/constants.js";
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 
+type ModelEntry = { id: string; label: string };
+type ConfigRecord = Record<string, unknown>;
+
+const LIST_MODELS_CACHE_TTL_MS = 30_000;
+let listModelsCache: { expiresAt: number; models: ModelEntry[] } | null = null;
+
 /**
  * Models available through Hermes Agent.
  *
@@ -25,9 +31,7 @@ export const label = ADAPTER_LABEL;
  * prefer detectModel() plus manual entry over curated placeholder models,
  * since Hermes availability depends on the user's local configuration.
  */
-export const models: { id: string; label: string }[] = [];
-
-type ConfigRecord = Record<string, unknown>;
+export const models: ModelEntry[] = [];
 
 /**
  * Probe an OpenAI-compatible /v1/models endpoint and return sorted model entries.
@@ -36,7 +40,7 @@ type ConfigRecord = Record<string, unknown>;
 async function fetchOpenAIModels(
   baseUrl: string,
   apiKey: string,
-): Promise<{ id: string; label: string }[]> {
+): Promise<ModelEntry[]> {
   try {
     const url = baseUrl.replace(/\/$/, "") + "/models";
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -164,7 +168,10 @@ function collectEndpoints(config: ConfigRecord): Map<string, string> {
  * credentials that are not available to the Paperclip process or an endpoint is
  * unreachable.
  */
-export async function listModels(): Promise<{ id: string; label: string }[]> {
+export async function listModels(): Promise<ModelEntry[]> {
+  const now = Date.now();
+  if (listModelsCache && listModelsCache.expiresAt > now) return listModelsCache.models;
+
   const hermesHome = process.env["HERMES_HOME"]?.trim() || join(homedir(), ".hermes");
   const configPath = join(hermesHome, "config.yaml");
   let content: string;
@@ -189,9 +196,14 @@ export async function listModels(): Promise<{ id: string; label: string }[]> {
       if (!modelsById.has(m.id)) modelsById.set(m.id, m.label);
     }
   }
-  return [...modelsById.entries()]
+  const discovered = [...modelsById.entries()]
     .map(([id, label]) => ({ id, label }))
     .sort((a, b) => a.id.localeCompare(b.id));
+  listModelsCache = {
+    expiresAt: Date.now() + LIST_MODELS_CACHE_TTL_MS,
+    models: discovered,
+  };
+  return discovered;
 }
 
 /**
