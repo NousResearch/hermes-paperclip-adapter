@@ -76,7 +76,7 @@ type DynamicOpenRouterModelSelection = {
   [key: string]: unknown;
 };
 
-const DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL = "minimax/minimax-m2.5:free";
+const DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL = "openai/gpt-oss-20b:free";
 
 function inferOpenRouterRole(
   ctx: AdapterExecutionContext,
