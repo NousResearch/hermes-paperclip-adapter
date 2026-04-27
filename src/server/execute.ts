@@ -603,18 +603,37 @@ export async function execute(
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+  const noTaskHeartbeatCompletedWithoutFinalResponse =
+    !taskId &&
+    !result.timedOut &&
+    result.exitCode !== 0 &&
+    Boolean(parsed.sessionId) &&
+    !parsed.response &&
+    !parsed.errorMessage;
+  const effectiveExitCode = noTaskHeartbeatCompletedWithoutFinalResponse
+    ? 0
+    : result.exitCode;
+  const effectiveResponse = noTaskHeartbeatCompletedWithoutFinalResponse
+    ? "No assigned or unassigned work found; no-task heartbeat completed without a final response."
+    : parsed.response || "";
 
   await ctx.onLog(
     "stdout",
     `[hermes] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`,
   );
+  if (noTaskHeartbeatCompletedWithoutFinalResponse) {
+    await ctx.onLog(
+      "stdout",
+      "[hermes] Treating empty no-task heartbeat response as idle success.\n",
+    );
+  }
   if (parsed.sessionId) {
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
   }
 
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
-    exitCode: result.exitCode,
+    exitCode: effectiveExitCode,
     signal: result.signal,
     timedOut: result.timedOut,
     provider: resolvedProvider,
@@ -634,13 +653,13 @@ export async function execute(
   }
 
   // Summary from agent response
-  if (parsed.response) {
-    executionResult.summary = parsed.response.slice(0, 2000);
+  if (effectiveResponse) {
+    executionResult.summary = effectiveResponse.slice(0, 2000);
   }
 
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
-    result: parsed.response || "",
+    result: effectiveResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
