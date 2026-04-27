@@ -108,7 +108,7 @@ Address the comment, POST a reply if needed, then continue working.
 ## Heartbeat Wake — Check for Work
 
 1. List ALL open issues assigned to you (todo, backlog, in_progress):
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | jq -r '.[] | select(.status != "done" and .status != "cancelled") | "\\(.identifier) \\(.status) \\(.priority) \\(.title)"' \`
 
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
    - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
@@ -116,7 +116,7 @@ Address the comment, POST a reply if needed, then continue working.
    - When done, mark complete and post a comment (see Workflow steps 2-4 above)
 
 3. If no issues assigned to you, check for unassigned issues:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | jq -r '.[] | select(.assigneeAgentId == null) | "\\(.identifier) \\(.title)"' \`
    If you find a relevant issue, assign it to yourself:
    \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
 
@@ -322,7 +322,10 @@ export async function execute(
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
-  const persistSession = cfgBoolean(config.persistSession) !== false;
+  // Default false: every wake should re-evaluate from scratch. A stale
+  // "all set" turn must not survive across heartbeats. Opt in with
+  // adapterConfig.persistSession=true if you want resume.
+  const persistSession = cfgBoolean(config.persistSession) === true;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
@@ -500,6 +503,22 @@ export async function execute(
 
   if (parsed.errorMessage) {
     executionResult.errorMessage = parsed.errorMessage;
+  } else if (
+    (result.exitCode !== 0 && result.exitCode != null) ||
+    result.timedOut
+  ) {
+    // Fallback: surface something actionable when parseHermesOutput's
+    // error-line heuristic finds nothing but the child still failed.
+    const tail = (result.stderr || "")
+      .split("\n")
+      .map((l) => l.trimEnd())
+      .filter((l) => l.length > 0)
+      .slice(-5)
+      .join("\n");
+    const header = result.timedOut
+      ? `Hermes timed out after ${timeoutSec}s (signal=${result.signal ?? "n/a"})`
+      : `Hermes exited with code ${result.exitCode}`;
+    executionResult.errorMessage = tail ? `${header}\n${tail}` : header;
   }
 
   if (parsed.usage) {
