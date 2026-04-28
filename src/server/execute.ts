@@ -77,6 +77,8 @@ type DynamicOpenRouterModelSelection = {
 };
 
 const DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL = "openai/gpt-oss-20b:free";
+const DEFAULT_OPENINFERENCE_HEADER_FALLBACK_MODEL = "gpt-5.5";
+const DEFAULT_OPENINFERENCE_HEADER_FALLBACK_PROVIDER = "openai-codex";
 
 function inferOpenRouterRole(
   ctx: AdapterExecutionContext,
@@ -96,6 +98,29 @@ function inferOpenRouterRole(
   if (name.includes("support")) return "support";
   if (name.includes("youtube") || name.includes("video")) return "youtube";
   return "default";
+}
+
+function hasOpenInferenceMalformedHeaderFailure(result: {
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
+}): boolean {
+  if (result.timedOut || result.exitCode === 0) return false;
+  const combined = `${result.stdout || ""}\n${result.stderr || ""}`;
+  return (
+    /Upstream error from OpenInference/i.test(combined) &&
+    /unexpected tokens remaining in message header/i.test(combined)
+  );
+}
+
+function setArgValue(args: string[], flag: string, value: string): void {
+  const idx = args.indexOf(flag);
+  if (idx >= 0 && args[idx + 1]) {
+    args[idx + 1] = value;
+    return;
+  }
+  args.push(flag, value);
 }
 
 async function resolveDynamicOpenRouterModel(
@@ -558,6 +583,7 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
+  let finalProvider = resolvedProvider;
   let result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
@@ -591,6 +617,41 @@ export async function execute(
       ...dynamicOpenRouterModel,
       model,
       source: "fallback-after-failure",
+    };
+    result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+    });
+  }
+
+  if (dynamicOpenRouterModel && hasOpenInferenceMalformedHeaderFailure(result)) {
+    const fallbackModel =
+      cfgString(config.openrouterMalformedHeaderFallbackModel) ||
+      DEFAULT_OPENINFERENCE_HEADER_FALLBACK_MODEL;
+    const fallbackProvider =
+      cfgString(config.openrouterMalformedHeaderFallbackProvider) ||
+      DEFAULT_OPENINFERENCE_HEADER_FALLBACK_PROVIDER;
+    const retryArgs = [...args];
+    setArgValue(retryArgs, "-m", fallbackModel);
+    if (fallbackProvider !== "auto") {
+      setArgValue(retryArgs, "--provider", fallbackProvider);
+    }
+
+    await ctx.onLog(
+      "stdout",
+      `[hermes] OpenRouter/OpenInference malformed-header failure on ${model}; retrying once with ${fallbackModel} via ${fallbackProvider}\n`,
+    );
+    model = fallbackModel;
+    finalProvider = fallbackProvider;
+    dynamicOpenRouterModel = {
+      ...dynamicOpenRouterModel,
+      source: "openinference-header-fallback",
+      fallback_from_model: dynamicOpenRouterModel.model,
+      fallback_model: fallbackModel,
+      fallback_provider: fallbackProvider,
     };
     result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
       cwd,
@@ -636,7 +697,7 @@ export async function execute(
     exitCode: effectiveExitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    provider: resolvedProvider,
+    provider: finalProvider,
     model,
   };
 
