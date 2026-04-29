@@ -63,6 +63,26 @@ function cfgStringArray(v: unknown): string[] | undefined {
     : undefined;
 }
 
+/**
+ * Coerce a Paperclip env-value (which may be a plain string, a structured
+ * `{ type: "plain"|"secret"|"env", value: "..." }` secret object, or
+ * something invalid) into the plain string form expected by child_process.
+ *
+ * Returns `undefined` for values that should NOT be set (empty strings,
+ * non-string values inside the wrapper, unknown shapes). The caller drops
+ * these so they don't clobber inherited env vars like HOME.
+ */
+function coerceEnvValue(raw: unknown): string | undefined {
+  if (typeof raw === "string") {
+    return raw.length > 0 ? raw : undefined;
+  }
+  if (raw && typeof raw === "object") {
+    const v = (raw as { value?: unknown }).value;
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Wake-up prompt builder
 // ---------------------------------------------------------------------------
@@ -420,9 +440,17 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
+  // Paperclip stores per-agent env vars in a structured-secret shape:
+  //   { type: "plain"|"secret"|"env", value: "..." }
+  // Older code did Object.assign(env, userEnv) which clobbered HOME (and
+  // others) with "[object Object]", breaking ~/.hermes/config.yaml lookup.
+  // Unwrap to plain strings, drop empty/invalid entries.
+  const userEnv = config.env as Record<string, unknown> | undefined;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    for (const [key, raw] of Object.entries(userEnv)) {
+      const coerced = coerceEnvValue(raw);
+      if (coerced !== undefined) env[key] = coerced;
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────

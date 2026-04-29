@@ -14,6 +14,7 @@ import type { CreateConfigValues } from "@paperclipai/adapter-utils";
 
 import {
   DEFAULT_TIMEOUT_SEC,
+  VALID_PROVIDERS,
 } from "../shared/constants.js";
 
 /**
@@ -29,16 +30,21 @@ export function buildHermesConfig(
     ac.model = v.model.trim();
   }
 
-  // NOTE: Provider is NOT set here because the Paperclip UI form
-  // (CreateConfigValues) does not expose a provider field.
-  // Instead, provider is resolved at runtime in execute.ts using
-  // a priority chain:
-  //   1. adapterConfig.provider (if set via API directly)
-  //   2. ~/.hermes/config.yaml detection
-  //   3. Model-name prefix inference
-  //   4. "auto" fallback
-  // This ensures correct provider routing even for agents created
-  // before provider tracking existed.
+  // Provider: persist if the Paperclip create-form passed one (e.g. for
+  // subscription-backed providers like openai-codex). The base
+  // CreateConfigValues type does not declare `provider`, but downstream
+  // forms can extend it; we accept it via duck-typing.
+  // If absent, runtime in execute.ts resolves via:
+  //   1. ~/.hermes/config.yaml detection
+  //   2. Model-name prefix inference
+  //   3. "auto" fallback
+  const providerCandidate = (v as { provider?: unknown }).provider;
+  if (
+    typeof providerCandidate === "string" &&
+    (VALID_PROVIDERS as readonly string[]).includes(providerCandidate)
+  ) {
+    ac.provider = providerCandidate;
+  }
 
   // Execution limits — let the user configure these from the Paperclip UI.
   // timeoutSec: wall-clock kill timeout for the hermes child process.
