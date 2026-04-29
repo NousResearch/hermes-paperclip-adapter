@@ -38,6 +38,12 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  "custom",
+  "ollama-cloud",
+  "deepseek",
+  "nvidia",
+  "xai",
+  "bedrock",
 ] as const;
 
 /**
