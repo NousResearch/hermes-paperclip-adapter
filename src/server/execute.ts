@@ -358,8 +358,9 @@ export async function execute(
   const prompt = buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
-  // Use -Q (quiet) to get clean output: just response + session_id line
-  const useQuiet = cfgBoolean(config.quiet) !== false; // default true
+  // -Q (quiet) suppresses stdout — response only on stderr, transcript empty.
+  // Default false so adapter captures full Hermes output for transcript parsing.
+  const useQuiet = cfgBoolean(config.quiet) === true; // default false
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
