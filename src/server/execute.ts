@@ -68,6 +68,33 @@ function cfgStringArray(v: unknown): string[] | undefined {
     : undefined;
 }
 
+function cfgObject(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : undefined;
+}
+
+function firstCfgString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const resolved = cfgString(value);
+    if (resolved) return resolved;
+  }
+  return undefined;
+}
+
+function readNestedString(
+  source: Record<string, unknown> | undefined,
+  path: string[],
+): string | undefined {
+  let current: unknown = source;
+  for (const segment of path) {
+    const object = cfgObject(current);
+    if (!object) return undefined;
+    current = object[segment];
+  }
+  return cfgString(current);
+}
+
 type DynamicOpenRouterModelSelection = {
   model: string;
   role?: string;
@@ -77,8 +104,50 @@ type DynamicOpenRouterModelSelection = {
 };
 
 const DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL = "openai/gpt-oss-20b:free";
-const DEFAULT_OPENINFERENCE_HEADER_FALLBACK_MODEL = "gpt-5.5";
-const DEFAULT_OPENINFERENCE_HEADER_FALLBACK_PROVIDER = "openai-codex";
+const DEFAULT_OPENROUTER_FREE_FALLBACK_MODELS = [
+  "openai/gpt-oss-20b:free",
+  "minimax/minimax-m2.5:free",
+  "openai/gpt-oss-120b:free",
+];
+
+function isOpenRouterFreeModel(model: string): boolean {
+  return model.endsWith(":free") && model !== "openrouter/free";
+}
+
+function cfgStringList(v: unknown): string[] | undefined {
+  if (Array.isArray(v) && v.every((i) => typeof i === "string")) {
+    return (v as string[]).map((i) => i.trim()).filter(Boolean);
+  }
+  if (typeof v === "string" && v.trim()) {
+    return v.split(",").map((i) => i.trim()).filter(Boolean);
+  }
+  return undefined;
+}
+
+function openRouterFreeFallbackModels(
+  config: Record<string, unknown>,
+  currentModel: string,
+): string[] {
+  const configured = [
+    ...(cfgStringList(config.openrouterFreeFallbackModels) || []),
+    cfgString(config.dynamicFreeModelFallbackModel) || "",
+    cfgString(config.openrouterMalformedHeaderFallbackModel) || "",
+  ].filter(Boolean);
+  const candidates = configured.length
+    ? configured
+    : [
+        ...DEFAULT_OPENROUTER_FREE_FALLBACK_MODELS,
+        DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL,
+      ];
+  const seen = new Set<string>([currentModel]);
+  const result: string[] = [];
+  for (const candidate of candidates) {
+    if (!isOpenRouterFreeModel(candidate) || seen.has(candidate)) continue;
+    seen.add(candidate);
+    result.push(candidate);
+  }
+  return result;
+}
 
 function inferOpenRouterRole(
   ctx: AdapterExecutionContext,
@@ -112,6 +181,13 @@ function hasOpenInferenceMalformedHeaderFailure(result: {
     /Upstream error from OpenInference/i.test(combined) &&
     /unexpected tokens remaining in message header/i.test(combined)
   );
+}
+
+function childFailed(result: {
+  exitCode?: number | null;
+  timedOut?: boolean;
+}): boolean {
+  return Boolean(result.timedOut || (typeof result.exitCode === "number" && result.exitCode !== 0));
 }
 
 function setArgValue(args: string[], flag: string, value: string): void {
@@ -201,8 +277,8 @@ Address the comment, POST a reply if needed, then continue working.
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
 
-1. List ALL open issues assigned to you (todo, backlog, in_progress):
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
+1. List ALL open issues assigned to you (todo, backlog, in_progress, blocked):
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}&status=todo,backlog,in_progress,blocked" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
 
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
    - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
@@ -223,14 +299,42 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const context = cfgObject(ctx.context);
+  const payload = cfgObject(context?.payload);
+  const issue = cfgObject(context?.issue);
+  const wakeComment = cfgObject(context?.wakeComment);
+
+  const taskId = firstCfgString(
+    ctx.config?.taskId,
+    context?.taskId,
+    context?.issueId,
+    payload?.taskId,
+    payload?.issueId,
+    issue?.id,
+  );
+  const taskTitle = firstCfgString(ctx.config?.taskTitle, issue?.title) || "";
+  const taskBody = firstCfgString(ctx.config?.taskBody, issue?.description) || "";
+  const commentId = firstCfgString(
+    ctx.config?.commentId,
+    context?.commentId,
+    context?.wakeCommentId,
+    payload?.commentId,
+    wakeComment?.id,
+  ) || "";
+  const wakeReason = firstCfgString(
+    ctx.config?.wakeReason,
+    context?.wakeReason,
+    context?.reason,
+  ) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = firstCfgString(
+    ctx.config?.companyName,
+    readNestedString(context, ["company", "name"]),
+  ) || "";
+  const projectName = firstCfgString(
+    ctx.config?.projectName,
+    readNestedString(context, ["project", "name"]),
+  ) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -524,13 +628,26 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  const context = cfgObject(ctx.context);
+  const payload = cfgObject(context?.payload);
+  const issue = cfgObject(context?.issue);
+  const taskId = firstCfgString(
+    ctx.config?.taskId,
+    context?.taskId,
+    context?.issueId,
+    payload?.taskId,
+    payload?.issueId,
+    issue?.id,
+  );
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
   }
+  if ((ctx as any).authToken) env.PAPERCLIP_API_KEY = (ctx as any).authToken;
+  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
@@ -592,74 +709,42 @@ export async function execute(
     onLog: wrappedOnLog,
   });
 
-  const dynamicOpenRouterFallbackModel =
-    cfgString(config.dynamicFreeModelFallbackModel) ||
-    DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL;
-  if (
-    dynamicOpenRouterModel &&
-    model !== dynamicOpenRouterFallbackModel &&
-    (result.timedOut || (result.exitCode !== null && result.exitCode !== 0))
-  ) {
+  if (dynamicOpenRouterModel && childFailed(result)) {
     const retryArgs = [...args];
-    const modelArgIndex = retryArgs.indexOf("-m");
-    if (modelArgIndex >= 0 && retryArgs[modelArgIndex + 1]) {
-      retryArgs[modelArgIndex + 1] = dynamicOpenRouterFallbackModel;
-    } else {
-      retryArgs.push("-m", dynamicOpenRouterFallbackModel);
+    const fallbackModels = openRouterFreeFallbackModels(config, model);
+    for (const fallbackModel of fallbackModels) {
+      if (!childFailed(result)) break;
+      const malformedHeaderFailure = hasOpenInferenceMalformedHeaderFailure(result);
+      setArgValue(retryArgs, "-m", fallbackModel);
+      setArgValue(retryArgs, "--provider", "openrouter");
+
+      await ctx.onLog(
+        "stdout",
+        malformedHeaderFailure
+          ? `[hermes] OpenRouter/OpenInference malformed-header failure on ${model}; retrying with free OpenRouter model ${fallbackModel}\n`
+          : `[hermes] OpenRouter free model ${model} failed or timed out; retrying with ${fallbackModel}\n`,
+      );
+      const previousModel = model;
+      model = fallbackModel;
+      finalProvider = "openrouter";
+      dynamicOpenRouterModel = {
+        ...dynamicOpenRouterModel,
+        model,
+        source: malformedHeaderFailure
+          ? "openinference-header-free-fallback"
+          : "free-fallback-after-failure",
+        fallback_from_model: previousModel,
+        fallback_model: fallbackModel,
+        fallback_provider: "openrouter",
+      };
+      result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
+        cwd,
+        env,
+        timeoutSec,
+        graceSec,
+        onLog: wrappedOnLog,
+      });
     }
-
-    await ctx.onLog(
-      "stdout",
-      `[hermes] OpenRouter model ${model} failed or timed out; retrying once with ${dynamicOpenRouterFallbackModel}\n`,
-    );
-    model = dynamicOpenRouterFallbackModel;
-    dynamicOpenRouterModel = {
-      ...dynamicOpenRouterModel,
-      model,
-      source: "fallback-after-failure",
-    };
-    result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
-      cwd,
-      env,
-      timeoutSec,
-      graceSec,
-      onLog: wrappedOnLog,
-    });
-  }
-
-  if (dynamicOpenRouterModel && hasOpenInferenceMalformedHeaderFailure(result)) {
-    const fallbackModel =
-      cfgString(config.openrouterMalformedHeaderFallbackModel) ||
-      DEFAULT_OPENINFERENCE_HEADER_FALLBACK_MODEL;
-    const fallbackProvider =
-      cfgString(config.openrouterMalformedHeaderFallbackProvider) ||
-      DEFAULT_OPENINFERENCE_HEADER_FALLBACK_PROVIDER;
-    const retryArgs = [...args];
-    setArgValue(retryArgs, "-m", fallbackModel);
-    if (fallbackProvider !== "auto") {
-      setArgValue(retryArgs, "--provider", fallbackProvider);
-    }
-
-    await ctx.onLog(
-      "stdout",
-      `[hermes] OpenRouter/OpenInference malformed-header failure on ${model}; retrying once with ${fallbackModel} via ${fallbackProvider}\n`,
-    );
-    model = fallbackModel;
-    finalProvider = fallbackProvider;
-    dynamicOpenRouterModel = {
-      ...dynamicOpenRouterModel,
-      source: "openinference-header-fallback",
-      fallback_from_model: dynamicOpenRouterModel.model,
-      fallback_model: fallbackModel,
-      fallback_provider: fallbackProvider,
-    };
-    result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
-      cwd,
-      env,
-      timeoutSec,
-      graceSec,
-      onLog: wrappedOnLog,
-    });
   }
 
   // ── Parse output ───────────────────────────────────────────────────────
