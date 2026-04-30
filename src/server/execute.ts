@@ -358,8 +358,9 @@ export async function execute(
   const prompt = buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
-  // Use -Q (quiet) to get clean output: just response + session_id line
-  const useQuiet = cfgBoolean(config.quiet) !== false; // default true
+  // -Q (quiet) suppresses stdout — response only on stderr, transcript empty.
+  // Default false so adapter captures full Hermes output for transcript parsing.
+  const useQuiet = cfgBoolean(config.quiet) === true; // default false
   const args: string[] = ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
@@ -420,9 +421,18 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
+  const userEnv = config.env as Record<string, unknown> | undefined;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    // Paperclip may serialize env values as wrapper objects:
+    //   { "KEY": { "type": "plain", "value": "..." } }
+    // Resolve them to raw strings so the child process receives valid values.
+    for (const [key, val] of Object.entries(userEnv)) {
+      if (val && typeof val === "object" && "value" in val) {
+        env[key] = String((val as { value: unknown }).value);
+      } else if (val != null) {
+        env[key] = String(val);
+      }
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
