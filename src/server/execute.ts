@@ -44,6 +44,11 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -61,6 +66,171 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+function cfgObject(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : undefined;
+}
+
+function firstCfgString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const resolved = cfgString(value);
+    if (resolved) return resolved;
+  }
+  return undefined;
+}
+
+function readNestedString(
+  source: Record<string, unknown> | undefined,
+  path: string[],
+): string | undefined {
+  let current: unknown = source;
+  for (const segment of path) {
+    const object = cfgObject(current);
+    if (!object) return undefined;
+    current = object[segment];
+  }
+  return cfgString(current);
+}
+
+type DynamicOpenRouterModelSelection = {
+  model: string;
+  role?: string;
+  source?: string;
+  free_model_count?: number;
+  [key: string]: unknown;
+};
+
+const DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL = "openai/gpt-oss-20b:free";
+const DEFAULT_OPENROUTER_FREE_FALLBACK_MODELS = [
+  "openai/gpt-oss-20b:free",
+  "minimax/minimax-m2.5:free",
+  "openai/gpt-oss-120b:free",
+];
+
+function isOpenRouterFreeModel(model: string): boolean {
+  return model.endsWith(":free") && model !== "openrouter/free";
+}
+
+function cfgStringList(v: unknown): string[] | undefined {
+  if (Array.isArray(v) && v.every((i) => typeof i === "string")) {
+    return (v as string[]).map((i) => i.trim()).filter(Boolean);
+  }
+  if (typeof v === "string" && v.trim()) {
+    return v.split(",").map((i) => i.trim()).filter(Boolean);
+  }
+  return undefined;
+}
+
+function openRouterFreeFallbackModels(
+  config: Record<string, unknown>,
+  currentModel: string,
+): string[] {
+  const configured = [
+    ...(cfgStringList(config.openrouterFreeFallbackModels) || []),
+    cfgString(config.dynamicFreeModelFallbackModel) || "",
+    cfgString(config.openrouterMalformedHeaderFallbackModel) || "",
+  ].filter(Boolean);
+  const candidates = configured.length
+    ? configured
+    : [
+        ...DEFAULT_OPENROUTER_FREE_FALLBACK_MODELS,
+        DEFAULT_DYNAMIC_OPENROUTER_FALLBACK_MODEL,
+      ];
+  const seen = new Set<string>([currentModel]);
+  const result: string[] = [];
+  for (const candidate of candidates) {
+    if (!isOpenRouterFreeModel(candidate) || seen.has(candidate)) continue;
+    seen.add(candidate);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function inferOpenRouterRole(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+): string {
+  const configured = cfgString(config.openrouterRole) || cfgString(config.roleKey);
+  if (configured) return configured;
+
+  const name = String(ctx.agent?.name || "").toLowerCase();
+  if (name.includes("research")) return "researcher";
+  if (name.includes("analytic")) return "analytics";
+  if (name.includes("engineer")) return "engineer";
+  if (name === "qa" || name.includes("qa")) return "qa";
+  if (name.includes("writer")) return "writer";
+  if (name.includes("market")) return "marketer";
+  if (name.includes("sales")) return "sales";
+  if (name.includes("support")) return "support";
+  if (name.includes("youtube") || name.includes("video")) return "youtube";
+  return "default";
+}
+
+function hasOpenInferenceMalformedHeaderFailure(result: {
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
+}): boolean {
+  if (result.timedOut || result.exitCode === 0) return false;
+  const combined = `${result.stdout || ""}\n${result.stderr || ""}`;
+  return (
+    /Upstream error from OpenInference/i.test(combined) &&
+    /unexpected tokens remaining in message header/i.test(combined)
+  );
+}
+
+function childFailed(result: {
+  exitCode?: number | null;
+  timedOut?: boolean;
+}): boolean {
+  return Boolean(result.timedOut || (typeof result.exitCode === "number" && result.exitCode !== 0));
+}
+
+function setArgValue(args: string[], flag: string, value: string): void {
+  const idx = args.indexOf(flag);
+  if (idx >= 0 && args[idx + 1]) {
+    args[idx + 1] = value;
+    return;
+  }
+  args.push(flag, value);
+}
+
+async function resolveDynamicOpenRouterModel(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+  currentModel: string,
+): Promise<DynamicOpenRouterModelSelection> {
+  const selector =
+    cfgString(config.openrouterModelSelector) ||
+    "/mnt/d/AiMe/scripts/paperclip_select_openrouter_free_model.py";
+  const role = inferOpenRouterRole(ctx, config);
+  const maxAgeHours = String(cfgNumber(config.dynamicFreeModelMaxAgeHours) || 6);
+  const { stdout } = await execFileAsync(
+    selector,
+    [
+      "--role",
+      role,
+      "--current",
+      currentModel,
+      "--max-age-hours",
+      maxAgeHours,
+      "--json",
+    ],
+    {
+      timeout: 150000,
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  const parsed = JSON.parse(stdout) as DynamicOpenRouterModelSelection;
+  const model = typeof parsed.model === "string" ? parsed.model.trim() : "";
+  if (!model) {
+    throw new Error("OpenRouter selector returned no model");
+  }
+  return { ...parsed, model };
 }
 
 // ---------------------------------------------------------------------------
@@ -87,11 +257,12 @@ Title: {{taskTitle}}
 ## Workflow
 
 1. Work on the task using your tools
-2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
-3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
-4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
+2. Before marking the issue done, verify every artifact path you plan to mention actually exists. Use commands like \`test -f /absolute/path\` or \`ls -la /absolute/path\`.
+3. If a requested artifact is missing, do not mark the issue done. Leave the issue in progress or blocked and comment with the missing path and what is needed.
+4. When done, mark the issue as completed with a single PATCH that includes structured evidence:
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done","comment":"DONE: <summary>\\n\\nCompletion evidence:\\n- Artifacts: <absolute paths you verified, or none required>\\n- Verification: <commands/checks run>\\n- Human decision needed: <none, or SEND / EDIT-FIRST / SKIP / other decision>"}'\`
+5. If a human must choose SEND / EDIT-FIRST / SKIP, publish, buy, approve, or provide access, keep that explicit in the completion evidence so dashboards route it as a manual decision instead of final signoff.
+6. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
@@ -107,8 +278,8 @@ Address the comment, POST a reply if needed, then continue working.
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
 
-1. List ALL open issues assigned to you (todo, backlog, in_progress):
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
+1. List ALL open issues assigned to you (todo, backlog, in_progress, blocked):
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}&status=todo,backlog,in_progress,blocked" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
 
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
    - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
@@ -129,14 +300,42 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const context = cfgObject(ctx.context);
+  const payload = cfgObject(context?.payload);
+  const issue = cfgObject(context?.issue);
+  const wakeComment = cfgObject(context?.wakeComment);
+
+  const taskId = firstCfgString(
+    ctx.config?.taskId,
+    context?.taskId,
+    context?.issueId,
+    payload?.taskId,
+    payload?.issueId,
+    issue?.id,
+  );
+  const taskTitle = firstCfgString(ctx.config?.taskTitle, issue?.title) || "";
+  const taskBody = firstCfgString(ctx.config?.taskBody, issue?.description) || "";
+  const commentId = firstCfgString(
+    ctx.config?.commentId,
+    context?.commentId,
+    context?.wakeCommentId,
+    payload?.commentId,
+    wakeComment?.id,
+  ) || "";
+  const wakeReason = firstCfgString(
+    ctx.config?.wakeReason,
+    context?.wakeReason,
+    context?.reason,
+  ) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = firstCfgString(
+    ctx.config?.companyName,
+    readNestedString(context, ["company", "name"]),
+  ) || "";
+  const projectName = firstCfgString(
+    ctx.config?.projectName,
+    readNestedString(context, ["project", "name"]),
+  ) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -316,7 +515,7 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  let model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -338,6 +537,19 @@ export async function execute(
   // correct provider is still used.
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
+  let dynamicOpenRouterModel: DynamicOpenRouterModelSelection | null = null;
+
+  if (explicitProvider === "openrouter" && cfgBoolean(config.dynamicFreeModel) !== false) {
+    try {
+      dynamicOpenRouterModel = await resolveDynamicOpenRouterModel(ctx, config, model);
+      model = dynamicOpenRouterModel.model;
+    } catch (err) {
+      await ctx.onLog(
+        "stderr",
+        `[hermes] OpenRouter dynamic model selection failed; using configured model ${model}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
 
   if (!explicitProvider) {
     try {
@@ -417,13 +629,26 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  const context = cfgObject(ctx.context);
+  const payload = cfgObject(context?.payload);
+  const issue = cfgObject(context?.issue);
+  const taskId = firstCfgString(
+    ctx.config?.taskId,
+    context?.taskId,
+    context?.issueId,
+    payload?.taskId,
+    payload?.issueId,
+    issue?.id,
+  );
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
   }
+  if ((ctx as any).authToken) env.PAPERCLIP_API_KEY = (ctx as any).authToken;
+  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
@@ -443,6 +668,12 @@ export async function execute(
     await ctx.onLog(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,
+    );
+  }
+  if (dynamicOpenRouterModel) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] OpenRouter free model selected (role=${dynamicOpenRouterModel.role ?? "default"}, model=${dynamicOpenRouterModel.model}, source=${dynamicOpenRouterModel.source ?? "unknown"}, free_models=${dynamicOpenRouterModel.free_model_count ?? "unknown"})\n`,
     );
   }
 
@@ -470,7 +701,8 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
+  let finalProvider = resolvedProvider;
+  let result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
     timeoutSec,
@@ -478,23 +710,80 @@ export async function execute(
     onLog: wrappedOnLog,
   });
 
+  if (dynamicOpenRouterModel && childFailed(result)) {
+    const retryArgs = [...args];
+    const fallbackModels = openRouterFreeFallbackModels(config, model);
+    for (const fallbackModel of fallbackModels) {
+      if (!childFailed(result)) break;
+      const malformedHeaderFailure = hasOpenInferenceMalformedHeaderFailure(result);
+      setArgValue(retryArgs, "-m", fallbackModel);
+      setArgValue(retryArgs, "--provider", "openrouter");
+
+      await ctx.onLog(
+        "stdout",
+        malformedHeaderFailure
+          ? `[hermes] OpenRouter/OpenInference malformed-header failure on ${model}; retrying with free OpenRouter model ${fallbackModel}\n`
+          : `[hermes] OpenRouter free model ${model} failed or timed out; retrying with ${fallbackModel}\n`,
+      );
+      const previousModel = model;
+      model = fallbackModel;
+      finalProvider = "openrouter";
+      dynamicOpenRouterModel = {
+        ...dynamicOpenRouterModel,
+        model,
+        source: malformedHeaderFailure
+          ? "openinference-header-free-fallback"
+          : "free-fallback-after-failure",
+        fallback_from_model: previousModel,
+        fallback_model: fallbackModel,
+        fallback_provider: "openrouter",
+      };
+      result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
+        cwd,
+        env,
+        timeoutSec,
+        graceSec,
+        onLog: wrappedOnLog,
+      });
+    }
+  }
+
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+  const noTaskHeartbeatCompletedWithoutFinalResponse =
+    !taskId &&
+    !result.timedOut &&
+    result.exitCode !== 0 &&
+    Boolean(parsed.sessionId) &&
+    !parsed.response &&
+    !parsed.errorMessage;
+  const effectiveExitCode = noTaskHeartbeatCompletedWithoutFinalResponse
+    ? 0
+    : result.exitCode;
+  const effectiveResponse = noTaskHeartbeatCompletedWithoutFinalResponse
+    ? "No assigned or unassigned work found; no-task heartbeat completed without a final response."
+    : parsed.response || "";
 
   await ctx.onLog(
     "stdout",
     `[hermes] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`,
   );
+  if (noTaskHeartbeatCompletedWithoutFinalResponse) {
+    await ctx.onLog(
+      "stdout",
+      "[hermes] Treating empty no-task heartbeat response as idle success.\n",
+    );
+  }
   if (parsed.sessionId) {
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
   }
 
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
-    exitCode: result.exitCode,
+    exitCode: effectiveExitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    provider: resolvedProvider,
+    provider: finalProvider,
     model,
   };
 
@@ -511,16 +800,17 @@ export async function execute(
   }
 
   // Summary from agent response
-  if (parsed.response) {
-    executionResult.summary = parsed.response.slice(0, 2000);
+  if (effectiveResponse) {
+    executionResult.summary = effectiveResponse.slice(0, 2000);
   }
 
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
-    result: parsed.response || "",
+    result: effectiveResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
+    dynamic_openrouter_model: dynamicOpenRouterModel,
   };
 
   // Store session ID for next run
