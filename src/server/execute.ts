@@ -257,11 +257,12 @@ Title: {{taskTitle}}
 ## Workflow
 
 1. Work on the task using your tools
-2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
-3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
-4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
+2. Before marking the issue done, verify every artifact path you plan to mention actually exists. Use commands like \`test -f /absolute/path\` or \`ls -la /absolute/path\`.
+3. If a requested artifact is missing, do not mark the issue done. Leave the issue in progress or blocked and comment with the missing path and what is needed.
+4. When done, mark the issue as completed with a single PATCH that includes structured evidence:
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done","comment":"DONE: <summary>\\n\\nCompletion evidence:\\n- Artifacts: <absolute paths you verified, or none required>\\n- Verification: <commands/checks run>\\n- Human decision needed: <none, or SEND / EDIT-FIRST / SKIP / other decision>"}'\`
+5. If a human must choose SEND / EDIT-FIRST / SKIP, publish, buy, approve, or provide access, keep that explicit in the completion evidence so dashboards route it as a manual decision instead of final signoff.
+6. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
