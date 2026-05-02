@@ -63,6 +63,27 @@ function cfgStringArray(v: unknown): string[] | undefined {
     : undefined;
 }
 
+export function resolveEnvValue(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.value === "string") return record.value;
+    if (typeof record.plain === "string") return record.plain;
+  }
+  return undefined;
+}
+
+export function applyConfiguredEnv(
+  env: Record<string, string>,
+  userEnv: Record<string, unknown> | undefined,
+): void {
+  if (!userEnv || typeof userEnv !== "object") return;
+  for (const [key, value] of Object.entries(userEnv)) {
+    const resolved = resolveEnvValue(value);
+    if (resolved !== undefined) env[key] = resolved;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Wake-up prompt builder
 // ---------------------------------------------------------------------------
@@ -420,10 +441,7 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
-  }
+  applyConfiguredEnv(env, config.env as Record<string, unknown> | undefined);
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
