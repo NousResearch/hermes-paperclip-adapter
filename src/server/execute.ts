@@ -24,6 +24,12 @@ import type {
   UsageSummary,
 } from "@paperclipai/adapter-utils";
 
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
 import {
   runChildProcess,
   buildPaperclipEnv,
@@ -205,12 +211,145 @@ const TOKEN_USAGE_REGEX =
 /** Regex to extract cost from Hermes output. */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
 
+const execFileAsync = promisify(execFile);
+
 interface ParsedOutput {
   sessionId?: string;
   response?: string;
   usage?: UsageSummary;
   costUsd?: number;
   errorMessage?: string;
+}
+
+interface HermesSessionUsage {
+  usage: UsageSummary;
+  costUsd?: number;
+  provider?: string;
+  model?: string;
+  billingType?: "api" | "subscription" | "metered_api" | "subscription_included" | "subscription_overage" | "credits" | "fixed" | "unknown";
+  details: Record<string, unknown>;
+}
+
+function resolveHermesHome(
+  env: Record<string, string | undefined>,
+  config: Record<string, unknown>,
+): string {
+  return (
+    cfgString(config.hermesHome) ||
+    env.HERMES_HOME ||
+    join(homedir(), ".hermes")
+  );
+}
+
+function billingTypeFromMode(mode: string | null | undefined): HermesSessionUsage["billingType"] {
+  if (!mode) return "unknown";
+  if (mode === "api_key" || mode === "api") return "api";
+  if (mode === "subscription") return "subscription";
+  return "unknown";
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Read Hermes' authoritative per-session usage/cost data from state.db.
+ *
+ * Hermes quiet output only exposes a session_id. Current Paperclip accounting
+ * needs AdapterExecutionResult.usage/costUsd to be populated by the adapter, so
+ * the local adapter joins the session_id back to Hermes' SQLite state store.
+ * This is best-effort: missing sqlite/python/state.db must never fail the run.
+ */
+export async function readHermesSessionUsage(
+  sessionId: string | undefined,
+  env: Record<string, string | undefined>,
+  config: Record<string, unknown>,
+): Promise<HermesSessionUsage | null> {
+  if (!sessionId) return null;
+
+  const stateDb = join(resolveHermesHome(env, config), "state.db");
+  if (!existsSync(stateDb)) return null;
+
+  const sql = `
+import json, sqlite3, sys
+session_id = sys.argv[1]
+db_path = sys.argv[2]
+con = sqlite3.connect(db_path)
+con.row_factory = sqlite3.Row
+row = con.execute("""
+select
+  id,
+  model,
+  input_tokens,
+  output_tokens,
+  cache_read_tokens,
+  cache_write_tokens,
+  reasoning_tokens,
+  billing_provider,
+  billing_mode,
+  estimated_cost_usd,
+  actual_cost_usd,
+  cost_status,
+  cost_source,
+  pricing_version,
+  api_call_count
+from sessions
+where id = ?
+limit 1
+""", (session_id,)).fetchone()
+con.close()
+print(json.dumps(dict(row) if row else None))
+`;
+
+  try {
+    const { stdout } = await execFileAsync("python3", ["-c", sql, sessionId, stateDb], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    const row = JSON.parse(stdout.trim()) as Record<string, unknown> | null;
+    if (!row) return null;
+
+    const inputTokens = Number(row.input_tokens) || 0;
+    const outputTokens = Number(row.output_tokens) || 0;
+    const cachedInputTokens = Number(row.cache_read_tokens) || 0;
+    const actualCost = nullableNumber(row.actual_cost_usd);
+    const estimatedCost = nullableNumber(row.estimated_cost_usd);
+    const costUsd = actualCost !== null && actualCost > 0
+      ? actualCost
+      : estimatedCost !== null
+        ? estimatedCost
+        : undefined;
+
+    return {
+      usage: {
+        inputTokens,
+        outputTokens,
+        ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+      },
+      ...(costUsd !== undefined ? { costUsd } : {}),
+      provider: typeof row.billing_provider === "string" ? row.billing_provider : undefined,
+      model: typeof row.model === "string" ? row.model : undefined,
+      billingType: billingTypeFromMode(typeof row.billing_mode === "string" ? row.billing_mode : undefined),
+      details: {
+        usage_source: "hermes_state_db",
+        session_id: sessionId,
+        cache_write_tokens: Number(row.cache_write_tokens) || 0,
+        reasoning_tokens: Number(row.reasoning_tokens) || 0,
+        billing_provider: row.billing_provider ?? null,
+        billing_mode: row.billing_mode ?? null,
+        estimated_cost_usd: estimatedCost,
+        actual_cost_usd: actualCost,
+        cost_status: row.cost_status ?? null,
+        cost_source: row.cost_source ?? null,
+        pricing_version: row.pricing_version ?? null,
+        api_call_count: Number(row.api_call_count) || 0,
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +619,10 @@ export async function execute(
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+  const hermesUsage = await readHermesSessionUsage(parsed.sessionId, env, config);
+  if (hermesUsage) {
+    await ctx.onLog("stdout", "[hermes] Usage loaded from Hermes state.db\n");
+  }
 
   await ctx.onLog(
     "stdout",
@@ -494,20 +637,24 @@ export async function execute(
     exitCode: result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
-    provider: resolvedProvider,
-    model,
+    provider: hermesUsage?.provider || resolvedProvider,
+    model: hermesUsage?.model || model,
   };
+
+  if (hermesUsage?.billingType) {
+    executionResult.billingType = hermesUsage.billingType;
+  }
 
   if (parsed.errorMessage) {
     executionResult.errorMessage = parsed.errorMessage;
   }
 
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
+  if (hermesUsage?.usage || parsed.usage) {
+    executionResult.usage = hermesUsage?.usage || parsed.usage;
   }
 
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
+  if (hermesUsage?.costUsd !== undefined || parsed.costUsd !== undefined) {
+    executionResult.costUsd = hermesUsage?.costUsd ?? parsed.costUsd;
   }
 
   // Summary from agent response
@@ -515,12 +662,16 @@ export async function execute(
     executionResult.summary = parsed.response.slice(0, 2000);
   }
 
+  const resultJsonUsage = hermesUsage?.usage || parsed.usage || null;
+  const resultJsonCostUsd = hermesUsage?.costUsd ?? parsed.costUsd ?? null;
+
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
+    usage: resultJsonUsage,
+    cost_usd: resultJsonCostUsd,
+    ...(hermesUsage ? { hermes_usage: hermesUsage.details } : {}),
   };
 
   // Store session ID for next run
