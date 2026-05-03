@@ -420,9 +420,18 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
+  const userEnv = config.env as
+    | Record<string, string | { type: "plain" | "secret"; value: string }>
+    | undefined;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    for (const [key, raw] of Object.entries(userEnv)) {
+      if (raw && typeof raw === "object" && "value" in raw) {
+        // Paperclip wraps env values as {type: "plain"|"secret", value: string}
+        env[key] = String((raw as { value: unknown }).value);
+      } else if (typeof raw === "string") {
+        env[key] = raw;
+      }
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
