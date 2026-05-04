@@ -129,9 +129,25 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
+  // Heartbeat populates the task on `ctx.context` (top-level), not on `ctx.config`.
+  // Prefer the structured `paperclipIssue` ({identifier, title, description}) when
+  // available, then fall back to `paperclipTaskMarkdown` for the body, then to
+  // `ctx.config?.task*` overrides for backwards compatibility with callers that
+  // wire the task through adapter config.
+  const issue = (ctx.context?.paperclipIssue ?? null) as
+    | { identifier?: unknown; title?: unknown; description?: unknown }
+    | null;
+  const taskMarkdown = cfgString(ctx.context?.paperclipTaskMarkdown);
+
+  const taskId =
+    cfgString(ctx.config?.taskId) ?? cfgString(issue?.identifier);
+  const taskTitle =
+    cfgString(ctx.config?.taskTitle) ?? cfgString(issue?.title) ?? "";
+  const taskBody =
+    cfgString(ctx.config?.taskBody) ??
+    cfgString(issue?.description) ??
+    taskMarkdown ??
+    "";
   const commentId = cfgString(ctx.config?.commentId) || "";
   const wakeReason = cfgString(ctx.config?.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
@@ -417,7 +433,13 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  // Mirror the buildPrompt resolution order: config override first, then the
+  // structured `paperclipIssue.identifier` populated by the heartbeat.
+  const envIssue = (ctx.context?.paperclipIssue ?? null) as
+    | { identifier?: unknown }
+    | null;
+  const taskId =
+    cfgString(ctx.config?.taskId) ?? cfgString(envIssue?.identifier);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
