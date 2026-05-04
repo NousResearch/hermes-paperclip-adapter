@@ -415,14 +415,72 @@ export async function execute(
   };
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
-    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
+  }
+
+  // Resolve agent auth token AFTER userEnv so a user-provided PAPERCLIP_API_KEY
+  // (e.g. a long-lived admin key in adapter_config.env, or one inherited from
+  // process.env on a self-hosted Paperclip container) cannot mask the
+  // run-scoped JWT.
+  //
+  // Priority order (highest first):
+  //   1. ctx.authToken — short-lived run JWT minted by Paperclip server when
+  //      the adapter declares supportsLocalAgentJwt=true.
+  //   2. Self-signed HS256 JWT, if PAPERCLIP_AGENT_JWT_SECRET (or
+  //      BETTER_AUTH_SECRET as fallback, matching the server's
+  //      agent-auth-jwt.js secret resolution) is available. Claims match the
+  //      server's verifyLocalAgentJwt contract.
+  //   3. Whatever was already in env.PAPERCLIP_API_KEY (legacy fallback).
+  //
+  // Without this, agents inherit a company-scoped admin key (pcp_...) and every
+  // request to /api/agents/me/* returns 401, breaking the issue-driven heartbeat
+  // pattern documented in skills/paperclip/SKILL.md.
+  // Refs: paperclipai/paperclip#2915, #856
+  {
+    const ctxAuthToken = (ctx as any).authToken as string | undefined;
+    let resolvedKey: string | undefined = ctxAuthToken;
+
+    if (!resolvedKey) {
+      const jwtSecret = (
+        process.env.PAPERCLIP_AGENT_JWT_SECRET ||
+        process.env.BETTER_AUTH_SECRET ||
+        ""
+      ).trim();
+      if (jwtSecret && ctx.agent?.id && ctx.agent?.companyId && ctx.runId) {
+        const { createHmac } = await import("node:crypto");
+        const b64url = (b: string | Buffer): string =>
+          (typeof b === "string" ? Buffer.from(b, "utf8") : b).toString(
+            "base64url",
+          );
+        const ttlSec =
+          Number(process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS) || 60 * 60 * 48;
+        const now = Math.floor(Date.now() / 1000);
+        const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+        const payload = b64url(
+          JSON.stringify({
+            sub: ctx.agent.id,
+            company_id: ctx.agent.companyId,
+            adapter_type: (ctx.agent as any).adapterType || "hermes_local",
+            run_id: ctx.runId,
+            iat: now,
+            exp: now + ttlSec,
+          }),
+        );
+        const data = `${header}.${payload}`;
+        const signature = createHmac("sha256", jwtSecret)
+          .update(data)
+          .digest("base64url");
+        resolvedKey = `${data}.${signature}`;
+      }
+    }
+
+    if (!resolvedKey) resolvedKey = env.PAPERCLIP_API_KEY;
+    if (resolvedKey) env.PAPERCLIP_API_KEY = resolvedKey;
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
