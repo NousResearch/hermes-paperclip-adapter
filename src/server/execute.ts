@@ -62,6 +62,19 @@ function cfgStringArray(v: unknown): string[] | undefined {
     ? (v as string[])
     : undefined;
 }
+function cfgEnvString(v: unknown): string | undefined {
+  if (typeof v === "string" && v.length > 0) return v;
+  if (
+    v &&
+    typeof v === "object" &&
+    "value" in v &&
+    typeof (v as { value?: unknown }).value === "string" &&
+    (v as { value: string }).value.length > 0
+  ) {
+    return (v as { value: string }).value;
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Wake-up prompt builder
@@ -325,6 +338,7 @@ export async function execute(
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
+  const userEnv = config.env as Record<string, unknown> | undefined;
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
@@ -355,7 +369,14 @@ export async function execute(
   });
 
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  const promptConfig: Record<string, unknown> = { ...config };
+  if (!cfgString(promptConfig.paperclipApiUrl) && userEnv && typeof userEnv === "object") {
+    const configuredPaperclipApiUrl = cfgEnvString(userEnv.PAPERCLIP_API_URL);
+    if (configuredPaperclipApiUrl) {
+      promptConfig.paperclipApiUrl = configuredPaperclipApiUrl;
+    }
+  }
+  const prompt = buildPrompt(ctx, promptConfig);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
@@ -420,9 +441,8 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+    Object.assign(env, userEnv as Record<string, string>);
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
