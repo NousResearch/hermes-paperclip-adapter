@@ -18,31 +18,45 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 /**
+ * Hermes session IDs follow the format `YYYYMMDD_HHMMSS_<hex>`, e.g.
+ * `20260513_091310_fb8871`. Anything that does not match — such as the
+ * word `"from"` accidentally captured from error output — is rejected.
+ */
+const HERMES_SESSION_ID_RE = /^\d{8}_\d{6}_[a-f0-9]+$/;
+
+function readValidSessionId(value: unknown): string | null {
+  const s = readNonEmptyString(value);
+  if (!s || !HERMES_SESSION_ID_RE.test(s)) return null;
+  return s;
+}
+
+/**
  * Session codec for structured validation and migration of session parameters.
  *
  * Hermes Agent uses a single `sessionId` for cross-heartbeat session continuity
- * via the `--resume` CLI flag. The codec validates and normalizes this field.
+ * via the `--resume` CLI flag. The codec validates and normalizes this field,
+ * rejecting values that do not match the Hermes session ID format.
  */
 export const sessionCodec: AdapterSessionCodec = {
   deserialize(raw: unknown) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
     const record = raw as Record<string, unknown>;
     const sessionId =
-      readNonEmptyString(record.sessionId) ??
-      readNonEmptyString(record.session_id);
+      readValidSessionId(record.sessionId) ??
+      readValidSessionId(record.session_id);
     if (!sessionId) return null;
     return { sessionId };
   },
   serialize(params: Record<string, unknown> | null) {
     if (!params) return null;
     const sessionId =
-      readNonEmptyString(params.sessionId) ??
-      readNonEmptyString(params.session_id);
+      readValidSessionId(params.sessionId) ??
+      readValidSessionId(params.session_id);
     if (!sessionId) return null;
     return { sessionId };
   },
   getDisplayId(params: Record<string, unknown> | null) {
     if (!params) return null;
-    return readNonEmptyString(params.sessionId) ?? readNonEmptyString(params.session_id);
+    return readValidSessionId(params.sessionId) ?? readValidSessionId(params.session_id);
   },
 };
