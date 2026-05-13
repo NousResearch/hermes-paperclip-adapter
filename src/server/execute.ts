@@ -44,6 +44,9 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 
+import { promises as fsp } from "node:fs";
+import path from "node:path";
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -354,8 +357,56 @@ export async function execute(
     model,
   });
 
+  // ── Load instruction files from managed directory ──────────────────────
+  // Reads all .md files from the agent's managed instructions directory
+  // and prepends them to the prompt so agents actually receive their
+  // role-specific context. Without this, the per-agent AGENTS.md files
+  // visible in the Paperclip UI are never delivered to Hermes.
+  let instructionsPrefix = "";
+  const instructionsRoot =
+    cfgString(config.instructionsRootPath) ||
+    cfgString(config.instructionsFilePath);
+  if (instructionsRoot) {
+    // instructionsRootPath points to the directory; instructionsFilePath may point to a file
+    let dir = instructionsRoot;
+    if (path.extname(dir)) {
+      dir = path.dirname(dir);
+    }
+    try {
+      const files = await fsp.readdir(dir);
+      // Read entry file first (default: AGENTS.md), then others alphabetically
+      const entryFile = cfgString(config.instructionsEntryFile) || "AGENTS.md";
+      const prioritisedFiles = [
+        entryFile,
+        ...files.filter((f) => f !== entryFile && f.endsWith(".md")),
+      ];
+      const distinctFiles = [...new Set(prioritisedFiles)].filter((f) =>
+        f.endsWith(".md"),
+      );
+      const parts: string[] = [];
+      for (const file of distinctFiles) {
+        try {
+          const content = await fsp.readFile(path.join(dir, file), "utf-8");
+          if (content.trim()) {
+            parts.push(`# ${file}
+
+${content.trim()}`);
+          }
+        } catch {
+          /* file may not exist, skip */
+        }
+      }
+      if (parts.length > 0) {
+        instructionsPrefix = parts.join("\n\n---\n\n") + "\n\n---\n\n";
+      }
+    } catch {
+      /* directory may not exist yet, skip silently */
+    }
+  }
+
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  const basePrompt = buildPrompt(ctx, config);
+  const prompt = instructionsPrefix + basePrompt;
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
