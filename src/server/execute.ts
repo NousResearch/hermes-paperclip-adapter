@@ -104,6 +104,16 @@ Someone commented. Read it:
 Address the comment, POST a reply if needed, then continue working.
 {{/commentId}}
 
+{{#scopedWake}}
+## Scoped Wake Contract
+
+This wake payload targets issue: {{scopedIssueIdentifier}}.
+
+- Do work only for this scoped issue in this wake.
+- Do NOT check unassigned backlog or pick unrelated issues.
+- If current instructions conflict with this scoped payload, follow scoped payload first.
+{{/scopedWake}}
+
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
 
@@ -123,6 +133,21 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
+function detectScopedWake(taskBody: string, wakeReason: string): boolean {
+  return (
+    taskBody.includes("## Paperclip Wake Payload")
+    || taskBody.includes("## Paperclip Resume Delta")
+    || wakeReason === "issue_assigned"
+    || wakeReason === "issue_commented"
+    || wakeReason === "issue_status_changed"
+  );
+}
+
+function extractScopedIssueIdentifier(taskBody: string): string {
+  const m = taskBody.match(/^- issue:\s*([A-Z]+-\d+)\s*$/m);
+  return m?.[1]?.trim() || "";
+}
+
 function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
@@ -134,9 +159,17 @@ function buildPrompt(
   const taskBody = cfgString(ctx.config?.taskBody) || "";
   const commentId = cfgString(ctx.config?.commentId) || "";
   const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const isScopedWake = detectScopedWake(taskBody, wakeReason);
+  const scopedIssueIdentifier = extractScopedIssueIdentifier(taskBody);
   const agentName = ctx.agent?.name || "Hermes Agent";
   const companyName = cfgString(ctx.config?.companyName) || "";
   const projectName = cfgString(ctx.config?.projectName) || "";
+
+  if (isScopedWake && !scopedIssueIdentifier) {
+    console.error(
+      "[hermes-paperclip-adapter] Scoped wake detected but issue identifier missing from taskBody ('- issue: VER-123').",
+    );
+  }
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -159,6 +192,8 @@ function buildPrompt(
     taskBody,
     commentId,
     wakeReason,
+    scopedWake: isScopedWake,
+    scopedIssueIdentifier,
     projectName,
     paperclipApiUrl,
   };
@@ -175,7 +210,7 @@ function buildPrompt(
   // {{#noTask}}...{{/noTask}} — include if no task
   rendered = rendered.replace(
     /\{\{#noTask\}\}([\s\S]*?)\{\{\/noTask\}\}/g,
-    taskId ? "" : "$1",
+    taskId || isScopedWake ? "" : "$1",
   );
 
   // {{#commentId}}...{{/commentId}} — include if comment exists
@@ -184,8 +219,25 @@ function buildPrompt(
     commentId ? "$1" : "",
   );
 
+  rendered = rendered.replace(
+    /\{\{#scopedWake\}\}([\s\S]*?)\{\{\/scopedWake\}\}/g,
+    isScopedWake ? "$1" : "",
+  );
+
   // Replace remaining {{variable}} placeholders
-  return renderTemplate(rendered, vars);
+  const finalPrompt = renderTemplate(rendered, vars);
+
+  if (
+    isScopedWake
+    && scopedIssueIdentifier
+    && !finalPrompt.includes(scopedIssueIdentifier)
+  ) {
+    console.error(
+      `[hermes-paperclip-adapter] Scoped wake prompt contract violated: '${scopedIssueIdentifier}' not found in final prompt.`,
+    );
+  }
+
+  return finalPrompt;
 }
 
 // ---------------------------------------------------------------------------
