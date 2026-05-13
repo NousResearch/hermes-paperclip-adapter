@@ -193,10 +193,16 @@ function buildPrompt(
 // ---------------------------------------------------------------------------
 
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
-const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
+const SESSION_ID_REGEX = /^session_id:\s*(\S+)\s*$/m;
+
+const HERMES_SESSION_ID_PATTERN = /^\d{8}_\d{6}_[a-zA-Z0-9]{6,}$/;
+
+const HERMES_SESSION_DISPLAY_LENGTH = 16;
+
+const HERMES_SESSION_DISPLAY_SUFFIX = "...";
 
 /** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+const SESSION_ID_REGEX_LEGACY = /^\s*session[_ ](?:id|saved):\s*(\d{8}_\d{6}_[a-zA-Z0-9]{6,})\s*$/im;
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
@@ -204,6 +210,19 @@ const TOKEN_USAGE_REGEX =
 
 /** Regex to extract cost from Hermes output. */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
+
+
+function normalizeHermesSessionId(value: string | undefined): string | undefined {
+  const sessionId = value?.trim();
+  return sessionId && HERMES_SESSION_ID_PATTERN.test(sessionId) ? sessionId : undefined;
+}
+
+export function formatSessionDisplayId(sessionId: string): string {
+  if (sessionId.length <= HERMES_SESSION_DISPLAY_LENGTH) {
+    return sessionId;
+  }
+  return `${sessionId.slice(0, HERMES_SESSION_DISPLAY_LENGTH)}${HERMES_SESSION_DISPLAY_SUFFIX}`;
+}
 
 interface ParsedOutput {
   sessionId?: string;
@@ -246,7 +265,7 @@ function cleanResponse(raw: string): string {
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -256,7 +275,10 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   //   session_id: <id>
   const sessionMatch = stdout.match(SESSION_ID_REGEX);
   if (sessionMatch?.[1]) {
-    result.sessionId = sessionMatch?.[1] ?? null;
+    const sessionId = normalizeHermesSessionId(sessionMatch?.[1]);
+    if (sessionId) {
+      result.sessionId = sessionId;
+    }
     // The response is everything before the session_id line
     const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
     if (sessionLineIdx > 0) {
@@ -265,8 +287,9 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   } else {
     // Legacy format (non-quiet mode)
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    const legacySessionId = normalizeHermesSessionId(legacyMatch?.[1]);
+    if (legacySessionId) {
+      result.sessionId = legacySessionId;
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -274,6 +297,10 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     if (cleaned.length > 0) {
       result.response = cleaned;
     }
+  }
+
+  if (combined.match(/^Session not found:/m)) {
+    result.sessionId = undefined;
   }
 
   // Extract token usage
@@ -524,9 +551,9 @@ export async function execute(
   };
 
   // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
+  if (persistSession && result.exitCode === 0 && parsed.sessionId) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    executionResult.sessionDisplayId = formatSessionDisplayId(parsed.sessionId);
   }
 
   return executionResult;
