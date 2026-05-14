@@ -37,7 +37,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -49,10 +49,10 @@ jobs:
           npm run lint
           npm run typecheck
 
-      - name: Run CRM-DQ stub unit tests
+      - name: Run CRM-DQ non-env unit tests
         run: |
           set -euo pipefail
-          node --test crm-data-quality/tests/unit/d365-stub-service.test.mjs
+          node --test crm-data-quality/tests/unit/*.test.*
 
       - name: Record gate outputs
         if: always()
@@ -62,7 +62,7 @@ jobs:
             echo "CRM-DQ pre-env test lane completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "Executed: npm run lint"
             echo "Executed: npm run typecheck"
-            echo "Executed: node --test crm-data-quality/tests/unit/d365-stub-service.test.mjs"
+            echo "Executed: node --test crm-data-quality/tests/unit/*.test.*"
           } > test-results/summary.txt
 
       - name: Upload QA gate artifact
