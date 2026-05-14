@@ -1,0 +1,53 @@
+name: CRM-DQ Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crm-dq-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run non-env QA gates
+        run: |
+          npm run lint
+          npm run typecheck
+
+      - name: Record gate outputs
+        if: always()
+        run: |
+          mkdir -p test-results
+          echo "Non-env QA gates completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > test-results/summary.txt
+
+      - name: Upload QA gate artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm-dq-test-results
+          path: test-results/
+          if-no-files-found: error
+          retention-days: 7

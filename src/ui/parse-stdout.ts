@@ -249,12 +249,10 @@ export function parseHermesStdoutLine(
       ] as TranscriptEntry[];
     }
 
-    // Fallback: raw ┊ line that doesn't match tool format
-    const stripped = trimmed
-      .replace(/^\[done\]\s*/, "")
-      .replace(new RegExp(`^${TOOL_OUTPUT_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "")
-      .trim();
-    return [{ kind: "stdout", ts, text: stripped }];
+    // Quiet-mode tool output can wrap to continuation lines that start with
+    // "┊" and may contain raw command bodies. Suppress unmatched "┊" lines
+    // rather than emitting them as stdout to avoid leaking tool-call details.
+    return [];
   }
 
   // ── Thinking blocks ────────────────────────────────────────────────────

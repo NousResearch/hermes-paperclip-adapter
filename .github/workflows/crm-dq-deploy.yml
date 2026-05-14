@@ -1,0 +1,59 @@
+name: CRM-DQ Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Target environment name (example: dev, qa, prod)"
+        required: true
+        type: string
+      release_tag:
+        description: "Release tag or commit SHA to deploy"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crm-dq-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ github.event.inputs.target_environment || 'unconfigured' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build deployable package
+        run: npm run build
+
+      - name: Placeholder - authenticate to D365 or target environment
+        run: |
+          echo "TODO(day-one hookup): configure federated credential or secret-backed auth for target environment"
+          echo "Expected inputs: environment-specific connection values and service principal context"
+
+      - name: Placeholder - run environment-bound deployment command
+        run: |
+          echo "TODO(day-one hookup): replace with real deployment command (for example pac CLI / Azure pipeline task)"
+          echo "Target environment: ${{ github.event.inputs.target_environment || 'from tag trigger' }}"
+
+      - name: Placeholder - smoke validation after deployment
+        run: |
+          echo "TODO(day-one hookup): add post-deploy health checks that require live environment access"
