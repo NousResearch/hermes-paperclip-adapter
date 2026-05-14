@@ -1,0 +1,421 @@
+openapi: 3.1.0
+info:
+  title: CRM-DQ D365 Stub Interface Contract
+  version: v1.0
+  description: |
+    Interface contracts for CRM Data Quality extract, score, and publish operations.
+    Contract evolution follows ADR-005 additive-only minor changes.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-VER-Private
+servers:
+  - url: https://stub.local/crm-dq
+    description: Deterministic local/CI stub host
+security:
+  - bearerAuth: []
+paths:
+  /extract:
+    post:
+      operationId: extractSnapshots
+      summary: Extract normalized entity snapshots from Dataverse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtractRequest'
+            examples:
+              happyPath:
+                value:
+                  source_env: dev
+                  correlation_id: corr-2026-05-14-001
+                  entity_logical_names: [account, contact]
+      responses:
+        '200':
+          description: Extract completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractResponse'
+        '400':
+          description: Request validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidEntity:
+                  value:
+                    error_code: extract_invalid_entities
+                    message: entity_logical_names must contain only supported entities
+  /score:
+    post:
+      operationId: scoreSnapshots
+      summary: Evaluate quality rules and produce score summary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreRequest'
+            examples:
+              happyPath:
+                value:
+                  scan_run_id: 11111111-1111-1111-1111-111111111111
+                  contract_version: v1.0
+      responses:
+        '200':
+          description: Score completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoreResponse'
+        '400':
+          description: Request validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidContractVersion:
+                  value:
+                    error_code: score_invalid_contract_version
+                    message: contract_version must be v1.0
+  /publish:
+    post:
+      operationId: publishResults
+      summary: Publish score outputs to destination
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+            examples:
+              happyPath:
+                value:
+                  scan_run_id: 11111111-1111-1111-1111-111111111111
+                  destination: dataverse
+                  attempt_count: 1
+      responses:
+        '200':
+          description: Publish event recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishResponse'
+        '400':
+          description: Request validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidAttemptCount:
+                  value:
+                    error_code: publish_invalid_attempt_count
+                    message: attempt_count must be >= 1
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    DateTimeUtc:
+      type: string
+      format: date-time
+      description: RFC3339 timestamp in UTC
+    SourceSystem:
+      type: string
+      enum: [dataverse]
+    EntityLogicalName:
+      type: string
+      enum: [account, contact, lead, opportunity]
+    Severity:
+      type: string
+      enum: [critical, high, medium, low]
+    RuleStatus:
+      type: string
+      enum: [pass, warn, fail, skip]
+    PublishDestination:
+      type: string
+      enum: [dataverse, lakehouse, queue]
+    PublishStatus:
+      type: string
+      enum: [pending, succeeded, failed, dead_lettered]
+    PiiPolicyTag:
+      type: string
+      enum: [none, masked, restricted]
+    ScoreBand:
+      type: string
+      enum: [excellent, good, fair, poor, critical]
+    ExtractRequest:
+      type: object
+      required: [source_env, correlation_id, entity_logical_names]
+      properties:
+        source_env:
+          type: string
+          minLength: 1
+        correlation_id:
+          type: string
+          minLength: 1
+        entity_logical_names:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/EntityLogicalName'
+    DqScanRun:
+      type: object
+      required:
+        - scan_run_id
+        - contract_version
+        - source_system
+        - source_env
+        - started_at_utc
+        - status
+        - extracted_entity_count
+        - evaluated_rule_count
+        - correlation_id
+      properties:
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        contract_version:
+          type: string
+          pattern: '^v[0-9]+\.[0-9]+$'
+        source_system:
+          $ref: '#/components/schemas/SourceSystem'
+        source_env:
+          type: string
+          minLength: 1
+        started_at_utc:
+          $ref: '#/components/schemas/DateTimeUtc'
+        completed_at_utc:
+          $ref: '#/components/schemas/DateTimeUtc'
+        status:
+          type: string
+          enum: [running, completed, failed, cancelled]
+        extracted_entity_count:
+          type: integer
+          minimum: 0
+        evaluated_rule_count:
+          type: integer
+          minimum: 0
+        overall_score:
+          type: number
+          minimum: 0
+          maximum: 100
+        correlation_id:
+          type: string
+          minLength: 1
+    DqEntitySnapshot:
+      type: object
+      required:
+        - snapshot_id
+        - scan_run_id
+        - entity_logical_name
+        - entity_primary_id
+        - ingest_hash
+        - pii_policy_tag
+      properties:
+        snapshot_id:
+          $ref: '#/components/schemas/Uuid'
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        entity_logical_name:
+          $ref: '#/components/schemas/EntityLogicalName'
+        entity_primary_id:
+          type: string
+          minLength: 1
+        entity_primary_name:
+          type: string
+          maxLength: 300
+        region_code:
+          type: string
+          maxLength: 32
+        owner_principal_id:
+          $ref: '#/components/schemas/Uuid'
+        modified_on_utc:
+          $ref: '#/components/schemas/DateTimeUtc'
+        ingest_hash:
+          type: string
+          pattern: '^[A-Fa-f0-9]{64}$'
+        pii_policy_tag:
+          $ref: '#/components/schemas/PiiPolicyTag'
+    DqRuleResult:
+      type: object
+      required:
+        - rule_result_id
+        - scan_run_id
+        - snapshot_id
+        - rule_id
+        - rule_version
+        - severity
+        - status
+        - score_impact
+        - reason_code
+        - evaluated_at_utc
+      properties:
+        rule_result_id:
+          $ref: '#/components/schemas/Uuid'
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        snapshot_id:
+          $ref: '#/components/schemas/Uuid'
+        rule_id:
+          type: string
+          minLength: 1
+        rule_version:
+          type: string
+          minLength: 1
+        severity:
+          $ref: '#/components/schemas/Severity'
+        status:
+          $ref: '#/components/schemas/RuleStatus'
+        score_impact:
+          type: number
+          minimum: -100
+          maximum: 100
+        reason_code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          maxLength: 1000
+        evaluated_at_utc:
+          $ref: '#/components/schemas/DateTimeUtc'
+    DqScoreSummary:
+      type: object
+      required:
+        - score_summary_id
+        - scan_run_id
+        - overall_score
+        - completeness_score
+        - consistency_score
+        - validity_score
+        - fail_count
+        - warn_count
+        - pass_count
+        - score_band
+      properties:
+        score_summary_id:
+          $ref: '#/components/schemas/Uuid'
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        overall_score:
+          type: number
+          minimum: 0
+          maximum: 100
+        completeness_score:
+          type: number
+          minimum: 0
+          maximum: 100
+        consistency_score:
+          type: number
+          minimum: 0
+          maximum: 100
+        validity_score:
+          type: number
+          minimum: 0
+          maximum: 100
+        fail_count:
+          type: integer
+          minimum: 0
+        warn_count:
+          type: integer
+          minimum: 0
+        pass_count:
+          type: integer
+          minimum: 0
+        score_band:
+          $ref: '#/components/schemas/ScoreBand'
+    DqPublishEvent:
+      type: object
+      required:
+        - publish_event_id
+        - scan_run_id
+        - destination
+        - publish_status
+        - attempt_count
+      properties:
+        publish_event_id:
+          $ref: '#/components/schemas/Uuid'
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        snapshot_id:
+          $ref: '#/components/schemas/Uuid'
+        destination:
+          $ref: '#/components/schemas/PublishDestination'
+        destination_record_id:
+          type: string
+          minLength: 1
+        publish_status:
+          $ref: '#/components/schemas/PublishStatus'
+        attempt_count:
+          type: integer
+          minimum: 1
+        published_at_utc:
+          $ref: '#/components/schemas/DateTimeUtc'
+        error_code:
+          type: string
+          maxLength: 128
+        error_message:
+          type: string
+          maxLength: 1000
+    ExtractResponse:
+      type: object
+      required: [scan_run, snapshots]
+      properties:
+        scan_run:
+          $ref: '#/components/schemas/DqScanRun'
+        snapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/DqEntitySnapshot'
+    ScoreRequest:
+      type: object
+      required: [scan_run_id, contract_version]
+      properties:
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        contract_version:
+          type: string
+          pattern: '^v[0-9]+\.[0-9]+$'
+    ScoreResponse:
+      type: object
+      required: [rule_results, score_summary]
+      properties:
+        rule_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DqRuleResult'
+        score_summary:
+          $ref: '#/components/schemas/DqScoreSummary'
+    PublishRequest:
+      type: object
+      required: [scan_run_id, destination, attempt_count]
+      properties:
+        scan_run_id:
+          $ref: '#/components/schemas/Uuid'
+        destination:
+          $ref: '#/components/schemas/PublishDestination'
+        attempt_count:
+          type: integer
+          minimum: 1
+    PublishResponse:
+      type: object
+      required: [publish_event]
+      properties:
+        publish_event:
+          $ref: '#/components/schemas/DqPublishEvent'
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
