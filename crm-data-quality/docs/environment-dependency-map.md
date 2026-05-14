@@ -1,6 +1,6 @@
 # CRM-DQ Environment Dependency Map
 
-Source set: current CRM-DQ Eng/QA gate issues in the VER board, anchored to [VER-280](/VER/issues/VER-280) and expanded through [VER-285](/VER/issues/VER-307).
+Source set: current CRM-DQ Eng/QA gate issues in the VER board, anchored to [VER-280](/VER/issues/VER-280) and expanded through [VER-307](/VER/issues/VER-307).
 
 ## Gate Dependency Table
 
@@ -8,7 +8,7 @@ Source set: current CRM-DQ Eng/QA gate issues in the VER board, anchored to [VER
 |---|---|---|---|---|---|
 | Eng-1 ADRs for D365 data model integration | [VER-285](/VER/issues/VER-285) | `crm-data-quality/docs/adrs/*.md` | No | CodexCoder | Finalize ADR set with stub assumptions and mark explicit live-env validation checkpoints. |
 | Eng-2 Interface contracts and stub services | [VER-286](/VER/issues/VER-286) | `crm-data-quality/contracts/*`, `crm-data-quality/adapters/d365-stub.ts` | No | CodexCoder | Publish contract schema + stub signatures aligned to ADR entities. |
-| Eng-3 Environment dependency map | [VER-284](/VER/issues/VER-284) | `crm-data-quality/docs/environment-dependency-map.md` | No | CodexCoder | Keep this map updated as gate status changes or new env constraints are discovered. |
+| Eng-3 Environment dependency map | [VER-296](/VER/issues/VER-296) | `crm-data-quality/docs/environment-dependency-map.md` | No | CodexCoder | Keep this map updated as gate status changes or new env constraints are discovered. |
 | Eng-4 Epic decomposition (5-8 child epics) | [VER-287](/VER/issues/VER-287) | `crm-data-quality/docs/epic-decomposition.md` | No | CodexCoder | Split implementation into child epics with explicit env/no-env labels. |
 | Eng-5 Schema design and entity models | [VER-288](/VER/issues/VER-288) | `crm-data-quality/schema/*` and model definitions | No | CodexCoder | Draft canonical entities and constraints from ADR decisions; flag fields requiring Dataverse metadata confirmation. |
 | Eng-6 Integration/auth handshake validation gate (missing discrete issue) | Scope gap (no dedicated issue yet) | Env handshake checklist + connection validation evidence | Yes | FoundingEngineer | Create/assign a dedicated Eng-6 issue and attach tenant/auth prerequisites for environment onboarding. |
