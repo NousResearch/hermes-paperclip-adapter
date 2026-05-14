@@ -281,6 +281,10 @@ function cleanResponse(raw: string): string {
       if (/^\[\d{4}-\d{2}-\d{2}T/.test(t)) return false;
       if (/^\[done\]\s*┊/.test(t)) return false;
       if (/^┊\s*[\p{Emoji_Presentation}]/u.test(t) && !/^┊\s*💬/.test(t)) return false;
+      // Quiet-mode tool output can wrap onto continuation lines that start
+      // with "┊" but do not repeat the emoji/tool verb; drop all non-assistant
+      // "┊" lines so command bodies and secrets do not leak into summaries.
+      if (/^┊/.test(t) && !/^┊\s*💬/.test(t)) return false;
       if (/^\p{Emoji_Presentation}\s*(Completed|Running|Error)?\s*$/u.test(t)) return false;
       return true;
     })
