@@ -1,10 +1,21 @@
 name: CRM-DQ Test
 
+# Pre-env lane: this workflow uses only local stubs/mocks and no live credentials.
+# Future env wiring: add a separate live-validation workflow with protected
+# environment secrets after Dataverse connectivity is approved.
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'crm-data-quality/**'
+      - '.github/workflows/crm-dq-build.yml'
+      - '.github/workflows/crm-dq-test.yml'
   push:
     branches: [main]
+    paths:
+      - 'crm-data-quality/**'
+      - '.github/workflows/crm-dq-build.yml'
+      - '.github/workflows/crm-dq-test.yml'
   workflow_dispatch:
 
 permissions:
@@ -34,14 +45,25 @@ jobs:
 
       - name: Run non-env QA gates
         run: |
+          set -euo pipefail
           npm run lint
           npm run typecheck
+
+      - name: Run CRM-DQ stub unit tests
+        run: |
+          set -euo pipefail
+          node --test crm-data-quality/tests/unit/d365-stub-service.test.mjs
 
       - name: Record gate outputs
         if: always()
         run: |
           mkdir -p test-results
-          echo "Non-env QA gates completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > test-results/summary.txt
+          {
+            echo "CRM-DQ pre-env test lane completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Executed: npm run lint"
+            echo "Executed: npm run typecheck"
+            echo "Executed: node --test crm-data-quality/tests/unit/d365-stub-service.test.mjs"
+          } > test-results/summary.txt
 
       - name: Upload QA gate artifact
         if: always()

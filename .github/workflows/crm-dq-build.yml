@@ -1,10 +1,22 @@
 name: CRM-DQ Build
 
+# Pre-env lane: this workflow must stay secretless and deterministic.
+# Future env wiring: if a live Dataverse lane is needed, add a separate workflow
+# (or a dedicated job guarded by environment protection rules) rather than
+# introducing runtime secrets in this build scaffold.
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'crm-data-quality/**'
+      - '.github/workflows/crm-dq-build.yml'
+      - '.github/workflows/crm-dq-test.yml'
   push:
     branches: [main]
+    paths:
+      - 'crm-data-quality/**'
+      - '.github/workflows/crm-dq-build.yml'
+      - '.github/workflows/crm-dq-test.yml'
   workflow_dispatch:
 
 permissions:
