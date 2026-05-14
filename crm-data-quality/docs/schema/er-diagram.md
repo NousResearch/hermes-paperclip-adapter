@@ -110,6 +110,13 @@ erDiagram
 - `score`: consumes snapshots, emits `DQ_RULE_RESULT` + `DQ_SCORE_SUMMARY` + optional `DQ_REMEDIATION_ACTION`.
 - `publish`: writes `DQ_PUBLISH_EVENT` and destination ids/statuses.
 
+## Adapter payload mapping notes
+- `ExtractRequest.entity` / `ExtractResult.entity` map to `DQ_ENTITY_SNAPSHOT.entity_logical_name`.
+- `CanonicalRecord.id` maps to `DQ_ENTITY_SNAPSHOT.entity_primary_id`; `CanonicalRecord.name` maps to `entity_primary_name`.
+- `ScoreItem.recordId` is currently the join key for `DQ_RULE_RESULT.snapshot_id` until explicit `snapshot_id` propagation is added.
+- `ScoreResult.averageScore` maps to `DQ_SCORE_SUMMARY.overall_score`; sub-scores and `score_band` are canonical-only until parity expansion.
+- `PublishRequest.remediationRunId` maps to `DQ_SCAN_RUN.scan_run_id`; `PublishResult.status` maps to `DQ_PUBLISH_EVENT.publish_status` with enum expansion required for canonical parity.
+
 ## Validation anchors for QA design
 - Every row except `DQ_PUBLISH_EVENT` must carry `scan_run_id`.
 - `contract_version` must be present and semver-prefixed (`v`).
@@ -119,3 +126,4 @@ erDiagram
 ## Dataverse metadata confirmation required
 - `entity_primary_name`, `owner_principal_id`, and `region_code` mapping requires tenant metadata confirmation.
 - Destination write-back field names for `DQ_PUBLISH_EVENT.destination_record_id` depend on Dataverse table configuration.
+- `opportunity` enablement in the adapter entity union must be confirmed against tenant table exposure before production cutover.

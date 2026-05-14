@@ -11,6 +11,26 @@
 - `score` contract output: `DQ_RULE_RESULT`, `DQ_SCORE_SUMMARY`, optional `DQ_REMEDIATION_ACTION`
 - `publish` contract output: `DQ_PUBLISH_EVENT`
 
+## Contract-to-adapter mapping (current stub + planned parity)
+
+| Contract entity/field | Current adapter payload surface | Mapping status | Notes |
+| --- | --- | --- | --- |
+| `DQ_SCAN_RUN.scan_run_id` | `PublishRequest.remediationRunId` | partial | Current stub only carries run identity on publish; extract/score run envelope to be added in real adapter parity pass. |
+| `DQ_SCAN_RUN.status` | `PublishResult.status` | partial | Stub returns only terminal `published`; canonical model keeps full lifecycle (`running/completed/failed/cancelled`). |
+| `DQ_ENTITY_SNAPSHOT.entity_logical_name` | `ExtractRequest.entity` + `ExtractResult.entity` | partial | Contract supports `account/contact/lead/opportunity`; stub currently supports `account/contact/lead`. |
+| `DQ_ENTITY_SNAPSHOT.entity_primary_id` | `CanonicalRecord.id` | full | Direct mapping by record id. |
+| `DQ_ENTITY_SNAPSHOT.entity_primary_name` | `CanonicalRecord.name` | full | Direct mapping by record name/fullname. |
+| `DQ_ENTITY_SNAPSHOT.owner_principal_id` | `CanonicalRecord.ownerId` | partial | Present for account/lead samples; contact ownership derivation deferred. |
+| `DQ_RULE_RESULT.snapshot_id` | `ScoreItem.recordId` | partial | Stub score result references record id; canonical contract uses `snapshot_id` surrogate. |
+| `DQ_RULE_RESULT.score_impact` | `ScoreItem.score` (derived delta) | partial | Stub outputs bounded score (0..100); canonical model expects per-rule impact. |
+| `DQ_SCORE_SUMMARY.overall_score` | `ScoreResult.averageScore` | partial | Summary sub-metrics and banding are not yet emitted by stub. |
+| `DQ_PUBLISH_EVENT.publish_status` | `PublishResult.status` | partial | Stub uses `published`; contract requires pending/succeeded/failed/dead_lettered lifecycle. |
+
+### Mapping implication for Eng-5
+- Canonical schema remains the source of truth for persistence and downstream reporting.
+- Stub payload types are intentionally narrower for deterministic pre-env behavior and must converge in Eng-6 parity work before live rollout.
+- Any adapter expansion must preserve backwards compatibility for existing unit tests while introducing contract fields additively.
+
 ## DQ_SCAN_RUN
 Purpose: top-level execution envelope for one extraction/scoring/publish cycle.
 
@@ -143,3 +163,8 @@ Validation rules:
 - Logical names are constrained to `account/contact/lead/opportunity` for `v1.0`; additional entities require contract minor update.
 - `owner_principal_id` type and resolver behavior may differ between user/team-owned rows.
 - Region mapping source may come from business unit or custom fields and must be validated in Eng-6 live handshake.
+
+## Open questions for migration and parity
+- Should `snapshot_id` be generated in extract and propagated through score/publish, or synthesized from `entity_primary_id` during scoring?
+- Should publish retries append new `DQ_PUBLISH_EVENT` rows or mutate `attempt_count` on a stable row key per destination record?
+- Is `opportunity` enabled in initial stub parity scope, or gated behind an explicit feature flag until Dataverse metadata is confirmed?
