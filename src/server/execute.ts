@@ -44,6 +44,19 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 
+interface InboxIssueLite {
+  id?: string;
+  identifier?: string;
+  title?: string;
+  status?: string;
+  priority?: string;
+}
+
+interface SessionParams {
+  sessionId?: string;
+  updatedAtMs?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -361,6 +374,47 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   return result;
 }
 
+async function fetchInboxLite(
+  apiBase: string,
+  authToken: string,
+): Promise<InboxIssueLite[]> {
+  const res = await fetch(`${apiBase.replace(/\/+$/, "")}/agents/me/inbox-lite`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${authToken}`,
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`inbox-lite request failed (${res.status})`);
+  }
+  const body = await res.json();
+  if (!Array.isArray(body)) return [];
+  return body as InboxIssueLite[];
+}
+
+function hasHallucinatedInboxList(response: string, inbox: InboxIssueLite[]): boolean {
+  const lines = response.split("\n").map((l) => l.trim()).filter(Boolean);
+  const hasSyntheticRows = lines.some((line) =>
+    /^ID\s+\d+\s+status\s+\w+\s+priority\s+P\d\b/i.test(line)
+  );
+  if (!hasSyntheticRows) return false;
+
+  const knownIds = new Set(
+    inbox
+      .map((i) => i.identifier?.trim())
+      .filter((v): v is string => !!v),
+  );
+  if (knownIds.size === 0) return false;
+
+  // If the response claims to be listing issues but none of the real issue
+  // identifiers appear, treat this as stale/hallucinated session replay.
+  const containsRealIdentifier = Array.from(knownIds).some((id) =>
+    response.includes(id)
+  );
+  return !containsRealIdentifier;
+}
+
 // ---------------------------------------------------------------------------
 // Main execute
 // ---------------------------------------------------------------------------
@@ -381,6 +435,7 @@ export async function execute(
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
+  const maxSessionAgeHours = cfgNumber(config.maxSessionAgeHours) ?? 12;
 
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
@@ -453,10 +508,20 @@ export async function execute(
   args.push("--yolo");
 
   // Session resume
-  const prevSessionId = cfgString(
-    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
+  const existingSession = (ctx.runtime?.sessionParams as SessionParams | null) ?? null;
+  const prevSessionId = cfgString(existingSession?.sessionId);
+  const sessionUpdatedAtMs = typeof existingSession?.updatedAtMs === "number"
+    ? existingSession.updatedAtMs
+    : undefined;
+  const maxSessionAgeMs = maxSessionAgeHours > 0 ? maxSessionAgeHours * 60 * 60 * 1000 : 0;
+  const sessionExpired = !!(
+    prevSessionId
+    && sessionUpdatedAtMs
+    && maxSessionAgeMs > 0
+    && (Date.now() - sessionUpdatedAtMs) > maxSessionAgeMs
   );
-  if (persistSession && prevSessionId) {
+  const shouldResume = persistSession && !!prevSessionId && !sessionExpired;
+  if (shouldResume && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
 
@@ -495,10 +560,16 @@ export async function execute(
     "stdout",
     `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
-  if (prevSessionId) {
+  if (prevSessionId && shouldResume) {
     await ctx.onLog(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,
+    );
+  }
+  if (prevSessionId && sessionExpired) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Session expired (${maxSessionAgeHours}h max age): rotating instead of resuming ${prevSessionId}\n`,
     );
   }
 
@@ -526,7 +597,7 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
+  let result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
     timeoutSec,
@@ -535,7 +606,45 @@ export async function execute(
   });
 
   // ── Parse output ───────────────────────────────────────────────────────
-  const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+  let parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+
+  // Inbox sanity guard: if a resumed session returns a synthetic task list,
+  // rerun once without --resume so output is rebuilt from live API context.
+  let retriedWithoutResume = false;
+  if (persistSession && shouldResume && parsed.response) {
+    try {
+      const authToken = env.PAPERCLIP_API_KEY || "";
+      const apiBase = env.PAPERCLIP_API_URL || "";
+      if (authToken && apiBase) {
+        const inbox = await fetchInboxLite(apiBase, authToken);
+        if (hasHallucinatedInboxList(parsed.response, inbox)) {
+          retriedWithoutResume = true;
+          await ctx.onLog(
+            "stdout",
+            "[hermes] Inbox sanity check failed for resumed session output; retrying without --resume\n",
+          );
+          const retryArgs = args.filter((arg, idx, arr) =>
+            !(arg === "--resume" || (idx > 0 && arr[idx - 1] === "--resume"))
+          );
+          result = await runChildProcess(ctx.runId, hermesCmd, retryArgs, {
+            cwd,
+            env,
+            timeoutSec,
+            graceSec,
+            onLog: wrappedOnLog,
+          });
+          parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+        }
+      }
+    } catch (e) {
+      await ctx.onLog(
+        "stdout",
+        `[hermes] Inbox sanity check skipped: ${
+          e instanceof Error ? e.message : String(e)
+        }\n`,
+      );
+    }
+  }
 
   await ctx.onLog(
     "stdout",
@@ -577,11 +686,17 @@ export async function execute(
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
+    sessionReused: shouldResume,
+    sessionRotated: sessionExpired || retriedWithoutResume,
+    retriedWithoutResume,
   };
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
+    executionResult.sessionParams = {
+      sessionId: parsed.sessionId,
+      updatedAtMs: Date.now(),
+    };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 
