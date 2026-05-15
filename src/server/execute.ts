@@ -87,21 +87,24 @@ Title: {{taskTitle}}
 ## Workflow
 
 1. Work on the task using your tools
-2. When done, mark the issue as completed:
+2. When the task is complete or re-complete, mark the issue as completed:
    \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
-3. Post a completion comment on the issue summarizing what you did:
+3. When the task is complete or re-complete, post a completion comment on the issue summarizing what you did:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
-4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
+4. If the completed issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+
+Completion actions are conditional: run steps 2-4 only when the current run genuinely completes or re-completes the assigned task, not merely because you received a wake or comment.
 {{/taskId}}
 
 {{#commentId}}
 ## Comment on This Issue
 
-Someone commented. Read it:
+Someone commented. Read the comment:
    \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
 
-Address the comment, POST a reply if needed, then continue working.
+Address the comment directly. Post one substantive reply if needed, then stop unless your reply genuinely completes or re-completes the assigned task.
+Do not mark the issue done or post a DONE recap unless this reply genuinely resolves the task.
 {{/commentId}}
 
 {{#noTask}}
@@ -113,7 +116,7 @@ Address the comment, POST a reply if needed, then continue working.
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
    - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
    - Do the work in the project directory: {{projectName}}
-   - When done, mark complete and post a comment (see Workflow steps 2-4 above)
+   - When the selected task is complete, mark complete and post a comment (see conditional Workflow steps 2-4 above)
 
 3. If no issues assigned to you, check for unassigned issues:
    \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
