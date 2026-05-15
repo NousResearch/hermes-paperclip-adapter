@@ -66,7 +66,7 @@ export function buildHermesConfig(
 
   // Extra CLI arguments
   if (v.extraArgs) {
-    ac.extraArgs = v.extraArgs.split(/\s+/).filter(Boolean);
+    ac.extraArgs = v.extraArgs.split(/[\s,]+/).filter(Boolean);
   }
 
   // Thinking/reasoning effort

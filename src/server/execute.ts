@@ -35,8 +35,6 @@ import {
   HERMES_CLI,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
-  DEFAULT_MODEL,
-  VALID_PROVIDERS,
 } from "../shared/constants.js";
 
 import {
@@ -61,6 +59,16 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+function cfgExtraArgs(v: unknown): string[] | undefined {
+  const values = cfgStringArray(v);
+  if (!values) return undefined;
+  return values.flatMap((value) =>
+    value
+      .split(/[\s,]+/)
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -316,12 +324,12 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  const model = cfgString(config.model);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
-  const extraArgs = cfgStringArray(config.extraArgs);
+  const extraArgs = cfgExtraArgs(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
@@ -336,23 +344,30 @@ export async function execute(
   // This ensures that even if the agent was created before provider tracking
   // was added, or if the model was changed without updating provider, the
   // correct provider is still used.
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  let resolvedProvider = "auto";
+  let resolvedFrom = "hermesProfile";
   const explicitProvider = cfgString(config.provider);
 
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel();
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
-  }
+  if (model || explicitProvider) {
+    let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
 
-  const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
-    explicitProvider,
-    detectedProvider: detectedConfig?.provider,
-    detectedModel: detectedConfig?.model,
-    model,
-  });
+    if (!explicitProvider) {
+      try {
+        detectedConfig = await detectModel();
+      } catch {
+        // Non-fatal — detection failure shouldn't block execution
+      }
+    }
+
+    const resolved = resolveProvider({
+      explicitProvider,
+      detectedProvider: detectedConfig?.provider,
+      detectedModel: detectedConfig?.model,
+      model,
+    });
+    resolvedProvider = resolved.provider;
+    resolvedFrom = resolved.resolvedFrom;
+  }
 
   // ── Build prompt ───────────────────────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
@@ -437,7 +452,7 @@ export async function execute(
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
-    `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
+    `[hermes] Starting Hermes Agent (model=${model ?? "Hermes profile default"}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
   if (prevSessionId) {
     await ctx.onLog(
