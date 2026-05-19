@@ -30,6 +30,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "lint": "eslint src/",
+    "test": "npm run build && node --test dist/server/*.test.js",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },

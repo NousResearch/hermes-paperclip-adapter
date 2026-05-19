@@ -33,11 +33,17 @@ import {
 
 import {
   HERMES_CLI,
+  DEFAULT_MODEL,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
-  DEFAULT_MODEL,
   VALID_PROVIDERS,
 } from "../shared/constants.js";
+import {
+  extractLegacySessionId,
+  formatSessionDisplayId,
+  isValidHermesSessionId,
+  SESSION_ID_REGEX,
+} from "./session-id.js";
 
 import {
   detectModel,
@@ -192,12 +198,6 @@ function buildPrompt(
 // Output parsing
 // ---------------------------------------------------------------------------
 
-/** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
-const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
-
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
-
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -264,9 +264,9 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     }
   } else {
     // Legacy format (non-quiet mode)
-    const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    const legacySessionId = extractLegacySessionId(combined);
+    if (legacySessionId) {
+      result.sessionId = legacySessionId;
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -397,9 +397,12 @@ export async function execute(
   args.push("--yolo");
 
   // Session resume
-  const prevSessionId = cfgString(
+  const rawSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
+  const prevSessionId = isValidHermesSessionId(rawSessionId)
+    ? rawSessionId
+    : undefined;
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
@@ -526,7 +529,7 @@ export async function execute(
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    executionResult.sessionDisplayId = formatSessionDisplayId(parsed.sessionId);
   }
 
   return executionResult;
