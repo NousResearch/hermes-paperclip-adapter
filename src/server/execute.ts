@@ -44,6 +44,8 @@ import {
   resolveProvider,
 } from "./detect-model.js";
 
+import { readHermesSessionUsage } from "./read-hermes-session-usage.js";
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -508,6 +510,46 @@ export async function execute(
 
   if (parsed.costUsd !== undefined) {
     executionResult.costUsd = parsed.costUsd;
+  }
+
+  // Fallback: when the stdout regexes didn't extract usage but Hermes
+  // recorded a session, query Hermes' SQLite state via
+  // `hermes sessions export --session-id <id> -` for the real numbers.
+  //
+  // This is the common case under the Anthropic and OpenAI providers —
+  // Hermes consumes the SDK's `usage` field internally and doesn't echo
+  // a `tokens:` line to stdout, so the stdout-grep path comes up empty
+  // and Paperclip's cost_events table never gets a row.
+  //
+  // The reader returns null on any error (binary missing, session not
+  // found, malformed JSON, older Hermes without the export subcommand),
+  // so this is purely additive — never breaks an otherwise-successful run.
+  if (!executionResult.usage && parsed.sessionId) {
+    const fallback = await readHermesSessionUsage({
+      hermesCmd,
+      hermesHome: env.HERMES_HOME,
+      sessionId: parsed.sessionId,
+    });
+    if (fallback) {
+      executionResult.usage = fallback.usage;
+      if (executionResult.costUsd === undefined && fallback.costUsd !== undefined) {
+        executionResult.costUsd = fallback.costUsd;
+      }
+      const parts = [
+        `${fallback.usage.inputTokens} input`,
+        `${fallback.usage.outputTokens} output`,
+      ];
+      if (fallback.usage.cachedInputTokens) {
+        parts.push(`${fallback.usage.cachedInputTokens} cache read`);
+      }
+      if (fallback.costUsd !== undefined) {
+        parts.push(`est cost $${fallback.costUsd.toFixed(4)}`);
+      }
+      await ctx.onLog(
+        "stdout",
+        `[hermes] Usage from session store: ${parts.join(", ")}\n`,
+      );
+    }
   }
 
   // Summary from agent response
