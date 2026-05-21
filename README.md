@@ -185,7 +185,7 @@ Paperclip                          Hermes Agent
 The adapter spawns Hermes Agent's CLI in single-query mode (`-q`). Hermes
 processes the task using its full tool suite, then exits. The adapter:
 
-1. **Captures** stdout/stderr and parses token usage, session IDs, and cost
+1. **Captures** stdout/stderr and parses token usage, session IDs, and cost. When Hermes doesn't echo a `tokens: N input M output` line — which is the default behavior under Anthropic and OpenAI — the adapter falls back to `hermes sessions export --session-id <id> -`, reading the real provider-reported numbers from Hermes' SQLite session store.
 2. **Parses** raw output into structured `TranscriptEntry` objects (tool cards with status icons)
 3. **Post-processes** Hermes ASCII formatting (banners, setext headings, table borders) into clean GFM markdown
 4. **Reclassifies** benign stderr (MCP init, structured logs) so they don't show as errors
