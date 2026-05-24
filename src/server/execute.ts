@@ -195,9 +195,6 @@ function buildPrompt(
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
-
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -246,7 +243,7 @@ function cleanResponse(raw: string): string {
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -263,13 +260,15 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode)
-    const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
-    }
-    // In non-quiet mode, extract clean response from stdout by
-    // filtering out tool lines, system messages, and noise
+    // No `session_id: <id>` line found. Previously a permissive legacy
+    // regex (/session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i) was used as
+    // a fallback, but it matched error sentences such as
+    // "Use a session ID from a previous CLI run" and captured tokens like
+    // "from" as the session id. That bogus id was then persisted and
+    // passed to the next run as `--resume from`, which Hermes/Claude
+    // rejected, looping the agent on broken sessions. We now require the
+    // strict `^session_id: <id>` line and never infer ids from prose.
+    // In non-quiet mode, still extract a cleaned response for the summary.
     const cleaned = cleanResponse(stdout);
     if (cleaned.length > 0) {
       result.response = cleaned;
@@ -303,6 +302,33 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide the session params to persist for the next run.
+ *
+ * Only returns params on a clean successful exit. If the run errored or
+ * timed out, any session id parsed from the output is suspect (the CLI
+ * may have aborted mid-write or printed a sentinel like "session
+ * expired"), and persisting it would brick the next heartbeat with
+ * `--resume <bad-id>`.
+ */
+export function buildPersistedSessionParams(args: {
+  persistSession: boolean;
+  sessionId: string | null | undefined;
+  exitCode: number | null;
+  timedOut: boolean;
+}): { sessionId: string } | null {
+  const { persistSession, sessionId, exitCode, timedOut } = args;
+  if (!persistSession) return null;
+  if (!sessionId) return null;
+  if (exitCode !== 0) return null;
+  if (timedOut) return null;
+  return { sessionId };
 }
 
 // ---------------------------------------------------------------------------
@@ -523,10 +549,16 @@ export async function execute(
     cost_usd: parsed.costUsd ?? null,
   };
 
-  // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  // Store session ID for next run (gated on a clean successful exit).
+  const persistedSession = buildPersistedSessionParams({
+    persistSession,
+    sessionId: parsed.sessionId,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+  });
+  if (persistedSession) {
+    executionResult.sessionParams = persistedSession;
+    executionResult.sessionDisplayId = persistedSession.sessionId.slice(0, 16);
   }
 
   return executionResult;
