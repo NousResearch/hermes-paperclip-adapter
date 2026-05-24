@@ -195,9 +195,6 @@ function buildPrompt(
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
-
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -263,13 +260,13 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode)
-    const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
-    }
-    // In non-quiet mode, extract clean response from stdout by
-    // filtering out tool lines, system messages, and noise
+    // The legacy free-text regex used to live here, but it matched error
+    // sentences like "Use a session ID from a previous CLI run" and captured
+    // "from", which then got persisted as the session id and bricked every
+    // subsequent run (see https://github.com/NousResearch/hermes-paperclip-adapter/issues/…).
+    // Only honor the strict "session_id: <id>" line above; never infer a
+    // session id from prose. In non-quiet mode, still extract a cleaned
+    // response for the summary.
     const cleaned = cleanResponse(stdout);
     if (cleaned.length > 0) {
       result.response = cleaned;
@@ -523,8 +520,16 @@ export async function execute(
     cost_usd: parsed.costUsd ?? null,
   };
 
-  // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
+  // Store session ID for next run.
+  // Only persist on a successful, non-timed-out exit so we never carry a
+  // session id captured during an error/aborted run forward and brick the
+  // agent on its next heartbeat.
+  if (
+    persistSession &&
+    parsed.sessionId &&
+    result.exitCode === 0 &&
+    !result.timedOut
+  ) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
