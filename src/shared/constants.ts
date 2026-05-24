@@ -17,8 +17,15 @@ export const DEFAULT_TIMEOUT_SEC = 1800;
 /** Grace period after SIGTERM before SIGKILL (seconds). */
 export const DEFAULT_GRACE_SEC = 10;
 
-/** Default model to use if none specified. */
-export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
+/**
+ * Default model to use if none specified.
+ *
+ * Use "auto" so Hermes resolves the user's configured default model instead of
+ * forcing a baked-in provider/model id. This keeps fresh Paperclip agents from
+ * inheriting retired defaults and lets local Hermes provider routing own the
+ * fallback behavior.
+ */
+export const DEFAULT_MODEL = "auto";
 
 /**
  * Valid --provider choices for the hermes CLI.
