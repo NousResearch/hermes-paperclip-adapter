@@ -31,7 +31,9 @@
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "pretest": "npm run build",
+    "test": "node --test 'tests/**/*.test.mjs'"
   },
   "dependencies": {
     "@paperclipai/adapter-utils": "^2026.325.0",
