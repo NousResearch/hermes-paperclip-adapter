@@ -123,17 +123,60 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
-function buildPrompt(
+// Narrow the loosely-typed paperclipIssue context payload into a useful shape.
+interface PaperclipIssueContext {
+  id?: unknown;
+  title?: unknown;
+  description?: unknown;
+}
+
+function readPaperclipIssue(
+  ctx: AdapterExecutionContext,
+): PaperclipIssueContext | null {
+  const raw = ctx.context?.paperclipIssue;
+  if (raw && typeof raw === "object") {
+    return raw as PaperclipIssueContext;
+  }
+  return null;
+}
+
+/** @internal Exported for unit tests. Not part of the public adapter API. */
+export function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Paperclip's heartbeat service passes wake metadata in ctx.context (the
+  // per-run contextSnapshot), not ctx.config (the adapter's runtimeConfig).
+  // We keep ctx.config as the first source for backwards compatibility with
+  // any custom caller that already populates it, then fall back to ctx.context
+  // — which is what real Paperclip heartbeats actually use. Without the
+  // ctx.context fallback every @-mention comment and direct task assignment
+  // falls through to the {{#noTask}} branch because ctx.config.taskId is
+  // never populated by the server. See @paperclipai/server heartbeat.ts
+  // (the adapter.execute call) and @paperclipai/adapter-claude-local, which
+  // reads ctx.context.taskId directly.
+  const ctxIssue = readPaperclipIssue(ctx);
+  const taskId =
+    cfgString(ctx.config?.taskId) ||
+    cfgString(ctx.context?.taskId) ||
+    cfgString(ctx.context?.issueId);
+  const taskTitle =
+    cfgString(ctx.config?.taskTitle) || cfgString(ctxIssue?.title) || "";
+  const taskBody =
+    cfgString(ctx.config?.taskBody) ||
+    cfgString(ctxIssue?.description) ||
+    "";
+  const commentId =
+    cfgString(ctx.config?.commentId) ||
+    cfgString(ctx.context?.wakeCommentId) ||
+    cfgString(ctx.context?.commentId) ||
+    "";
+  const wakeReason =
+    cfgString(ctx.config?.wakeReason) ||
+    cfgString(ctx.context?.wakeReason) ||
+    "";
   const agentName = ctx.agent?.name || "Hermes Agent";
   const companyName = cfgString(ctx.config?.companyName) || "";
   const projectName = cfgString(ctx.config?.projectName) || "";
@@ -417,8 +460,20 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  // Mirror the prompt builder: prefer ctx.context, fall back to ctx.config.
+  const taskId =
+    cfgString(ctx.config?.taskId) ||
+    cfgString(ctx.context?.taskId) ||
+    cfgString(ctx.context?.issueId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
+  const wakeReasonEnv =
+    cfgString(ctx.config?.wakeReason) || cfgString(ctx.context?.wakeReason);
+  if (wakeReasonEnv) env.PAPERCLIP_WAKE_REASON = wakeReasonEnv;
+  const wakeCommentIdEnv =
+    cfgString(ctx.config?.commentId) ||
+    cfgString(ctx.context?.wakeCommentId) ||
+    cfgString(ctx.context?.commentId);
+  if (wakeCommentIdEnv) env.PAPERCLIP_WAKE_COMMENT_ID = wakeCommentIdEnv;
 
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
