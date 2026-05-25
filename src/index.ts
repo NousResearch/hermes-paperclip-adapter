@@ -11,6 +11,8 @@
 
 import { ADAPTER_TYPE, ADAPTER_LABEL } from "./shared/constants.js";
 
+export { DEFAULT_PROMPT_TEMPLATE } from "./server/execute.js";
+
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 
