@@ -195,8 +195,17 @@ function buildPrompt(
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+/**
+ * Regex for legacy session output format.
+ *
+ * Anchored to line start (with /m) to avoid matching inside hermes error
+ * messages such as "Use a session ID from a previous CLI run", which would
+ * otherwise capture "from" as the session ID. When that value is then
+ * stored and passed back as `--resume from` on the next heartbeat, hermes
+ * emits the same error text again — creating a self-perpetuating loop that
+ * only breaks when the agent's runtime session state is manually reset.
+ */
+const SESSION_ID_REGEX_LEGACY = /^session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/im;
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
