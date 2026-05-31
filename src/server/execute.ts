@@ -529,5 +529,42 @@ export async function execute(
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 
+  // ── Post usage data to Paperclip heartbeat-runs API ─────────────────────
+  // Fire-and-forget: if this fails, the run should still complete successfully.
+  if (ctx.runId && (parsed.usage || parsed.costUsd !== undefined)) {
+    const apiBaseUrl =
+      cfgString(config.paperclipApiUrl) ||
+      process.env.PAPERCLIP_API_URL ||
+      "http://127.0.0.1:3100/api";
+    const authToken =
+      (ctx as any).authToken || process.env.PAPERCLIP_API_KEY || "";
+
+    const usageJson = parsed.usage
+      ? JSON.stringify({
+          inputTokens: parsed.usage.inputTokens,
+          outputTokens: parsed.usage.outputTokens,
+        })
+      : null;
+
+    const totalCostUsd = parsed.costUsd;
+
+    fetch(`${apiBaseUrl}/heartbeat-runs/${ctx.runId}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...(usageJson !== null ? { usageJson } : {}),
+        ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+      }),
+    }).catch((err) => {
+      ctx.onLog(
+        "stderr",
+        `[hermes] Warning: failed to post usage to Paperclip: ${err instanceof Error ? err.message : String(err)}\n`,
+      ).catch(() => {});
+    });
+  }
+
   return executionResult;
 }
