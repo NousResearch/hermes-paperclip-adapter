@@ -526,7 +526,7 @@ export async function execute(
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    executionResult.sessionDisplayId = parsed.sessionId;
   }
 
   return executionResult;
