@@ -129,14 +129,14 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const taskId = cfgString(ctx.context?.taskId);
+  const taskTitle = cfgString(ctx.context?.taskTitle) || "";
+  const taskBody = cfgString(ctx.context?.taskBody) || "";
+  const commentId = cfgString(ctx.context?.commentId) || "";
+  const wakeReason = cfgString(ctx.context?.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = cfgString(ctx.context?.companyName) || "";
+  const projectName = cfgString(ctx.context?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
