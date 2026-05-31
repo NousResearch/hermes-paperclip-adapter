@@ -195,6 +195,9 @@ function buildPrompt(
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 
+/** Validate that a session ID has the expected format: YYYYMMDD_HHMMSS_<hex+> */
+const SESSION_ID_FORMAT = /^\d{8}_\d{6}_[a-f0-9]+$/;
+
 /** Regex for legacy session output format */
 const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 
@@ -255,8 +258,8 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   //
   //   session_id: <id>
   const sessionMatch = stdout.match(SESSION_ID_REGEX);
-  if (sessionMatch?.[1]) {
-    result.sessionId = sessionMatch?.[1] ?? null;
+  if (sessionMatch?.[1] && SESSION_ID_FORMAT.test(sessionMatch[1])) {
+    result.sessionId = sessionMatch[1];
     // The response is everything before the session_id line
     const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
     if (sessionLineIdx > 0) {
@@ -266,7 +269,7 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     // Legacy format (non-quiet mode)
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
     if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+      result.sessionId = legacyMatch?.[1];
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
