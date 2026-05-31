@@ -38,6 +38,7 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  "xai",
 ] as const;
 
 /**
@@ -76,6 +77,8 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
   ["qwen", "auto"],
   // Mistral
   ["mistral", "auto"],
+  // xAI / Grok
+  ["grok", "xai"],
   // HuggingFace models (org/model format)
   ["huggingface/", "huggingface"],
 ];
