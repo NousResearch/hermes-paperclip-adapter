@@ -129,14 +129,61 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Paperclip places wake context on ctx.context (the contextSnapshot), not on
+  // ctx.config (the resolved runtimeConfig: workspace + skills + env). Read task
+  // fields from ctx.context, with fallbacks to paperclipIssue / paperclipWake.issue
+  // (current Paperclip nests them there; the flat fields exist on older builds) and
+  // ctx.config last for backward-compat. Fixes #68.
+  const wakeCtx = (ctx.context ?? {}) as {
+    taskId?: unknown;
+    issueId?: unknown;
+    taskTitle?: unknown;
+    taskBody?: unknown;
+    commentId?: unknown;
+    wakeCommentId?: unknown;
+    wakeReason?: unknown;
+    companyName?: unknown;
+    projectName?: unknown;
+    paperclipTaskMarkdown?: unknown;
+    paperclipIssue?: { id?: unknown; title?: unknown; description?: unknown };
+    paperclipWake?: { reason?: unknown; issue?: { id?: unknown; title?: unknown } };
+  };
+  const wakeIssue = wakeCtx.paperclipWake?.issue ?? {};
+  const ctxIssue = wakeCtx.paperclipIssue ?? {};
+
+  const taskId =
+    cfgString(wakeCtx.taskId) ||
+    cfgString(wakeCtx.issueId) ||
+    cfgString(wakeIssue.id) ||
+    cfgString(ctxIssue.id) ||
+    cfgString(ctx.config?.taskId);
+  const taskTitle =
+    cfgString(ctxIssue.title) ||
+    cfgString(wakeIssue.title) ||
+    cfgString(wakeCtx.taskTitle) ||
+    cfgString(ctx.config?.taskTitle) ||
+    "";
+  const taskBody =
+    cfgString(ctxIssue.description) ||
+    cfgString(wakeCtx.paperclipTaskMarkdown) ||
+    cfgString(wakeCtx.taskBody) ||
+    cfgString(ctx.config?.taskBody) ||
+    "";
+  const commentId =
+    cfgString(wakeCtx.commentId) ||
+    cfgString(wakeCtx.wakeCommentId) ||
+    cfgString(ctx.config?.commentId) ||
+    "";
+  const wakeReason =
+    cfgString(wakeCtx.wakeReason) ||
+    cfgString(wakeCtx.paperclipWake?.reason) ||
+    cfgString(ctx.config?.wakeReason) ||
+    "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName =
+    cfgString(wakeCtx.companyName) || cfgString(ctx.config?.companyName) || "";
+  const projectName =
+    cfgString(wakeCtx.projectName) || cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -417,7 +464,18 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  const taskCtx = (ctx.context ?? {}) as {
+    taskId?: unknown;
+    issueId?: unknown;
+    paperclipWake?: { issue?: { id?: unknown } };
+    paperclipIssue?: { id?: unknown };
+  };
+  const taskId =
+    cfgString(taskCtx.taskId) ||
+    cfgString(taskCtx.issueId) ||
+    cfgString(taskCtx.paperclipWake?.issue?.id) ||
+    cfgString(taskCtx.paperclipIssue?.id) ||
+    cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
