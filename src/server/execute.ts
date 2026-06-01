@@ -354,6 +354,37 @@ export async function execute(
     model,
   });
 
+  // ── Terminal-status guard (#92) ─────────────────────────────────────────
+  // Paperclip can deliver a wake for an issue that is already in a terminal
+  // state (deferred wake, late comment, re-delivery). Spawning a Hermes run
+  // for a done/cancelled issue wastes budget and can trigger redundant work.
+  // The wake context carries the issue status on ctx.context (the heartbeat
+  // contextSnapshot); when it is terminal, skip the run with a no-op result.
+  const wakeCtx = (ctx.context ?? {}) as {
+    issueStatus?: unknown;
+    paperclipWake?: { issue?: { status?: unknown } };
+  };
+  const wakeStatus = (
+    cfgString(wakeCtx.paperclipWake?.issue?.status) ||
+    cfgString(wakeCtx.issueStatus) ||
+    ""
+  ).toLowerCase();
+  if (wakeStatus === "done" || wakeStatus === "cancelled") {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Skipping run \u2014 issue already in terminal status "${wakeStatus}" (guard #92)\n`,
+    );
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      provider: resolvedProvider,
+      model,
+      summary: `Skipped: issue already "${wakeStatus}"; no Hermes run spawned (guard #92).`,
+      resultJson: { result: "", session_id: null, usage: null, cost_usd: null },
+    };
+  }
+
   // ── Build prompt ───────────────────────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
 
