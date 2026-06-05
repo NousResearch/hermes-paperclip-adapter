@@ -1,27 +1,78 @@
-/**
- * Hermes Agent adapter for Paperclip.
- *
- * Runs Hermes Agent (https://github.com/NousResearch/hermes-agent)
- * as a managed employee in a Paperclip company. Hermes Agent is a
- * full-featured AI agent with 30+ native tools, persistent memory,
- * skills, session persistence, and MCP support.
- *
- * @packageDocumentation
- */
-
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { ADAPTER_TYPE, ADAPTER_LABEL } from "./shared/constants.js";
+import { parseModelFromConfig } from "./server/detect-model.js";
 
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 
-/**
- * Models available through Hermes Agent.
- *
- * Hermes supports any model via any provider. The Paperclip UI should
- * prefer detectModel() plus manual entry over curated placeholder models,
- * since Hermes availability depends on the user's local configuration.
- */
-export const models: { id: string; label: string }[] = [];
+// ── Curated model list + auto-detect Hermes default ───────────────────
+const CURATED_MODELS: { id: string; label: string }[] = [
+  { id: "", label: "Auto (use Hermes default)" },
+  // OpenCode Go
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash (OpenCode Go)" },
+  { id: "deepseek-v4", label: "DeepSeek V4 (OpenCode Go)" },
+  { id: "deepseek-v3", label: "DeepSeek V3 (OpenCode Go)" },
+  { id: "gpt-5.2-codex", label: "GPT-5.2 Codex (OpenCode Go)" },
+  // OpenCode Zen
+  { id: "claude-sonnet-4", label: "Claude Sonnet 4 (OpenCode Zen)" },
+  { id: "claude-opus-4", label: "Claude Opus 4 (OpenCode Zen)" },
+  { id: "gpt-5.4", label: "GPT-5.4 (OpenCode Zen)" },
+  { id: "o4-mini", label: "o4-mini (OpenCode Zen)" },
+  // Gemini
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
+  // Grok / xAI
+  { id: "grok-4", label: "Grok 4 (xAI)" },
+  { id: "grok-4.3", label: "Grok 4.3 (xAI)" },
+  // OpenRouter popular
+  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4 (OpenRouter)" },
+  { id: "openai/gpt-5.4", label: "GPT-5.4 (OpenRouter)" },
+  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro (OpenRouter)" },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash (OpenRouter)" },
+  // Ollama local
+  { id: "llama-3.2", label: "Llama 3.2 (Ollama)" },
+  { id: "qwen2.5", label: "Qwen 2.5 (Ollama)" },
+  { id: "mistral", label: "Mistral (Ollama)" },
+];
+
+// ── Populate models ───────────────────────────────────────────────────
+// Strategy: curated list + auto-detected Hermes default model.
+// In the future this can also fetch the Hermes model catalog for full
+// dynamic discovery.
+export const models: { id: string; label: string }[] = (() => {
+  const result = [...CURATED_MODELS];
+
+  // Auto-detect the user's configured model and add it prominently
+  try {
+    const configPath = join(homedir(), ".hermes", "config.yaml");
+    const content = readFileSync(configPath, "utf-8");
+    const detected = parseModelFromConfig(content);
+
+    if (detected?.model) {
+      // Move user's config model to the top of the list
+      const idx = result.findIndex((m) => m.id === detected.model);
+      const label = detected.provider
+        ? `${detected.model} (${detected.provider} — Hermes default)`
+        : `${detected.model} (Hermes default)`;
+
+      if (idx >= 0) {
+        result[idx] = { ...result[idx], label };
+        // Move to top (after Auto)
+        const entry = result.splice(idx, 1)[0];
+        result.splice(1, 0, entry);
+      } else {
+        result.splice(1, 0, { id: detected.model, label });
+      }
+    }
+  } catch {
+    // Config file doesn't exist — curated list still available
+  }
+
+  return result;
+})();
 
 /**
  * Documentation shown in the Paperclip UI when configuring a Hermes agent.
@@ -42,7 +93,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | model | string | (Hermes configured default) | Optional explicit model in provider/model format. Leave blank to use Hermes's configured default model. |
-| provider | string | (auto) | API provider: auto, openrouter, nous, openai-codex, zai, kimi-coding, minimax, minimax-cn. Usually not needed — Hermes auto-detects from model name. |
+| provider | string | (auto) | API provider. Usually not needed — Hermes auto-detects from model name. |
 | timeoutSec | number | 300 | Execution timeout in seconds |
 | graceSec | number | 10 | Grace period after SIGTERM before SIGKILL |
 
@@ -81,4 +132,4 @@ tools, persistent memory, session persistence, skills, and MCP support.
 - \`{{taskTitle}}\` — Task title (if assigned)
 - \`{{taskBody}}\` — Task description (if assigned)
 - \`{{projectName}}\` — Project name (if scoped to a project)
-`;
+\`;

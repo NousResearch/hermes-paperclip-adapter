@@ -38,6 +38,11 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  "opencode-go",
+  "opencode-codex",
+  "xai",
+  "xai-oauth",
+  "bedrock",
 ] as const;
 
 /**
@@ -78,6 +83,14 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
   ["mistral", "auto"],
   // HuggingFace models (org/model format)
   ["huggingface/", "huggingface"],
+  // OpenCode models
+  ["opencode-", "auto"],
+  // xAI / Grok models
+  ["grok-", "xai-oauth"],
+  ["grok/", "xai-oauth"],
+  // AWS Bedrock models
+  ["bedrock/", "bedrock"],
+  ["anthropic.", "bedrock"],
 ];
 
 /** Regex to extract session ID from Hermes CLI output. */
