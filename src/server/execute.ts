@@ -36,7 +36,6 @@ import {
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
-  VALID_PROVIDERS,
 } from "../shared/constants.js";
 
 import {
@@ -316,7 +315,21 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+
+  // ── Detect Hermes config first (used for both model & provider fallback) ─
+  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  const explicitProvider = cfgString(config.provider);
+
+  if (!explicitProvider) {
+    try {
+      detectedConfig = await detectModel();
+    } catch {
+      // Non-fatal — detection failure shouldn't block execution
+    }
+  }
+
+  // Model: explicit adapter config → Hermes config default → hardcoded default
+  const model = cfgString(config.model) || detectedConfig?.model || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -336,17 +349,6 @@ export async function execute(
   // This ensures that even if the agent was created before provider tracking
   // was added, or if the model was changed without updating provider, the
   // correct provider is still used.
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  const explicitProvider = cfgString(config.provider);
-
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel();
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
-  }
-
   const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
     explicitProvider,
     detectedProvider: detectedConfig?.provider,

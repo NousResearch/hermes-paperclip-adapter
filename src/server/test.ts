@@ -151,12 +151,14 @@ function checkApiKeys(
   const hasZai = has("ZAI_API_KEY");
   const hasKimi = has("KIMI_API_KEY");
   const hasMiniMax = has("MINIMAX_API_KEY");
+  const hasOpenCode = has("OPENCODE_GO_API_KEY") || has("OPENCODE_ZEN_API_KEY") || has("OPENCODE_API_KEY");
+  const hasGoogle = has("GOOGLE_API_KEY");
 
-  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI && !hasZai && !hasKimi && !hasMiniMax) {
+  if (!hasAnthropic && !hasOpenRouter && !hasOpenAI && !hasZai && !hasKimi && !hasMiniMax && !hasOpenCode && !hasGoogle) {
     return {
       level: "warn",
       message: "No LLM API keys found in environment",
-      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
+      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY, OPENCODE_GO_API_KEY, GOOGLE_API_KEY",
       code: "hermes_no_api_keys",
     };
   }
@@ -168,6 +170,8 @@ function checkApiKeys(
   if (hasZai) providers.push("Z.AI");
   if (hasKimi) providers.push("Kimi");
   if (hasMiniMax) providers.push("MiniMax");
+  if (hasOpenCode) providers.push("OpenCode");
+  if (hasGoogle) providers.push("Google");
 
   return {
     level: "info",
