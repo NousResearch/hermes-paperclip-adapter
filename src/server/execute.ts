@@ -420,9 +420,32 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+  // Paperclip persists adapterConfig.env as a map of "env bindings" — each
+  // value is wrapped in {type: "plain", value: "..."} (or {type: "secret_ref",
+  // secretId: "..."}) for the strict-secret-mode gate. The raw cast above
+  // (Record<string, string>) doesn't match what the server actually sends,
+  // so Object.assign was leaking the wrapper objects into the child env.
+  // Node then serializes each one as the literal string "[object Object]"
+  // when spawning, and Hermes crashes (e.g. PermissionError on os.mkdir
+  // when HERMES_HOME is set this way). Extract .value here for plain
+  // bindings; resolved secret_ref bindings arrive as plain strings.
+  const userEnv = config.env;
+  if (userEnv && typeof userEnv === "object" && !Array.isArray(userEnv)) {
+    for (const [key, raw] of Object.entries(userEnv as Record<string, unknown>)) {
+      if (typeof raw === "string") {
+        env[key] = raw;
+      } else if (
+        raw &&
+        typeof raw === "object" &&
+        (raw as { type?: unknown }).type === "plain" &&
+        typeof (raw as { value?: unknown }).value === "string"
+      ) {
+        env[key] = (raw as { value: string }).value;
+      }
+      // secret_ref bindings are resolved upstream by the Paperclip server
+      // before this point in spawn flow; if any unresolved wrapper sneaks
+      // through, dropping it is safer than crashing the child.
+    }
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
