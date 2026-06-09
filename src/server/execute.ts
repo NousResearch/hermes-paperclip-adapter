@@ -212,8 +212,49 @@ const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i
  * lets an already-poisoned agent self-heal by starting a fresh session.
  */
 const SESSION_ID_SHAPE = /^\d{8}_\d{6}_[0-9a-z]+$/i;
-function isValidSessionId(id: unknown): id is string {
+export function isValidSessionId(id: unknown): id is string {
   return typeof id === "string" && SESSION_ID_SHAPE.test(id);
+}
+
+/**
+ * Sanitize the agent-configured `env` map before it is merged into the child
+ * process environment.
+ *
+ * The Paperclip server is expected to resolve `secret_ref` bindings into plain
+ * strings before invoking the adapter (see test.ts). This is a defensive guard
+ * for when that has not happened: a bare `Object.assign` of an unresolved
+ * `secret_ref` descriptor object would coerce to the literal string
+ * "[object Object]" when the child is spawned, silently replacing the
+ * credential and breaking any agent (notably delegated sub-agents) whose task
+ * depends on that secret. Only string values are kept; anything else is
+ * reported as a warning so the problem is visible instead of corrupting the env.
+ */
+export function sanitizeUserEnv(userEnv: unknown): {
+  env: Record<string, string>;
+  warnings: string[];
+} {
+  const env: Record<string, string> = {};
+  const warnings: string[] = [];
+  if (userEnv && typeof userEnv === "object") {
+    for (const [key, value] of Object.entries(userEnv as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        env[key] = value;
+      } else if (
+        value !== null &&
+        typeof value === "object" &&
+        (value as { type?: unknown }).type === "secret_ref"
+      ) {
+        warnings.push(
+          `env var ${key} is an unresolved secret_ref and was skipped (the server is expected to resolve it to a string). Running without it instead of injecting "[object Object]".`,
+        );
+      } else if (value !== null && value !== undefined) {
+        warnings.push(
+          `env var ${key} has a non-string value (${typeof value}) and was skipped to avoid coercion to "[object Object]".`,
+        );
+      }
+    }
+  }
+  return { env, warnings };
 }
 
 /** Regex to extract token usage from Hermes output. */
@@ -264,7 +305,7 @@ function cleanResponse(raw: string): string {
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -449,38 +490,14 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  // Inject agent-configured env vars. The Paperclip server is expected to
-  // resolve secret_ref bindings into plain strings before invoking the
-  // adapter (see test.ts: "server resolves secrets before calling us").
-  //
-  // Guard against non-string values regardless of that contract: a bare
-  // Object.assign of an unresolved secret_ref descriptor object coerces to
-  // the literal string "[object Object]" when spawned, silently replacing the
-  // credential. Any agent whose task depends on that secret then fails to
-  // authenticate — which is exactly how delegated sub-agents end up stranded
-  // (e.g. HUBSPOT_SERVICE_KEY arriving as "[object Object]"). Assign only
-  // string values; surface anything unresolved instead of corrupting it.
-  const userEnv = config.env as Record<string, unknown> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    for (const [key, value] of Object.entries(userEnv)) {
-      if (typeof value === "string") {
-        env[key] = value;
-      } else if (
-        value !== null &&
-        typeof value === "object" &&
-        (value as { type?: unknown }).type === "secret_ref"
-      ) {
-        await ctx.onLog(
-          "stderr",
-          `[hermes] WARNING: env var ${key} is an unresolved secret_ref and was skipped (the server is expected to resolve it to a string). Running without it instead of injecting "[object Object]".\n`,
-        );
-      } else if (value !== null && value !== undefined) {
-        await ctx.onLog(
-          "stderr",
-          `[hermes] WARNING: env var ${key} has a non-string value (${typeof value}) and was skipped to avoid coercion to "[object Object]".\n`,
-        );
-      }
-    }
+  // Inject agent-configured env vars. Only string values are merged; an
+  // unresolved secret_ref descriptor (or any non-string) is skipped and
+  // surfaced as a warning rather than coerced to "[object Object]" — see
+  // sanitizeUserEnv() for the full rationale.
+  const { env: userEnv, warnings: envWarnings } = sanitizeUserEnv(config.env);
+  Object.assign(env, userEnv);
+  for (const warning of envWarnings) {
+    await ctx.onLog("stderr", `[hermes] WARNING: ${warning}\n`);
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
