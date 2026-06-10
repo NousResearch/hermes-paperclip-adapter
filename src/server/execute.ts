@@ -198,6 +198,65 @@ const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 /** Regex for legacy session output format */
 const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 
+/**
+ * Shape of a real Hermes session ID, e.g. "20260609_153047_5568c8"
+ * (YYYYMMDD_HHMMSS_<suffix>).
+ *
+ * This guard exists because the loose legacy regex above also matches prose
+ * such as Hermes' own error message "Use a session ID from a previous CLI
+ * run", capturing the word "from" as a session ID. That bogus value was then
+ * persisted and replayed as `hermes --resume from`, which fails with
+ * "Session not found: from" — printing the same message again, re-capturing
+ * "from", and stranding the run in a permanent recovery loop. Validating
+ * captured/stored IDs against this shape both prevents the bad capture and
+ * lets an already-poisoned agent self-heal by starting a fresh session.
+ */
+const SESSION_ID_SHAPE = /^\d{8}_\d{6}_[0-9a-z]+$/i;
+export function isValidSessionId(id: unknown): id is string {
+  return typeof id === "string" && SESSION_ID_SHAPE.test(id);
+}
+
+/**
+ * Sanitize the agent-configured `env` map before it is merged into the child
+ * process environment.
+ *
+ * The Paperclip server is expected to resolve `secret_ref` bindings into plain
+ * strings before invoking the adapter (see test.ts). This is a defensive guard
+ * for when that has not happened: a bare `Object.assign` of an unresolved
+ * `secret_ref` descriptor object would coerce to the literal string
+ * "[object Object]" when the child is spawned, silently replacing the
+ * credential and breaking any agent (notably delegated sub-agents) whose task
+ * depends on that secret. Only string values are kept; anything else is
+ * reported as a warning so the problem is visible instead of corrupting the env.
+ */
+export function sanitizeUserEnv(userEnv: unknown): {
+  env: Record<string, string>;
+  warnings: string[];
+} {
+  const env: Record<string, string> = {};
+  const warnings: string[] = [];
+  if (userEnv && typeof userEnv === "object") {
+    for (const [key, value] of Object.entries(userEnv as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        env[key] = value;
+      } else if (
+        value !== null &&
+        typeof value === "object" &&
+        (value as { type?: unknown }).type === "secret_ref"
+      ) {
+        warnings.push(
+          `env var ${key} is an unresolved secret_ref and was skipped (the server is expected to resolve it to a string). Running without it instead of injecting "[object Object]".`,
+        );
+      } else if (value !== null && value !== undefined) {
+        warnings.push(
+          `env var ${key} has a non-string value (${typeof value}) and was skipped to avoid coercion to "[object Object]".`,
+        );
+      }
+    }
+  }
+  return { env, warnings };
+}
+
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -246,7 +305,7 @@ function cleanResponse(raw: string): string {
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -263,10 +322,12 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode)
+    // Legacy format (non-quiet mode). The legacy regex is run against
+    // stdout+stderr, so it can match prose in error output — only accept a
+    // capture that actually looks like a session ID (see SESSION_ID_SHAPE).
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    if (isValidSessionId(legacyMatch?.[1])) {
+      result.sessionId = legacyMatch[1];
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -396,12 +457,21 @@ export async function execute(
   // system is designed for human-attended interactive sessions.
   args.push("--yolo");
 
-  // Session resume
+  // Session resume. Only resume from a value that looks like a real session
+  // ID — this guards against a previously-persisted bogus value (e.g. "from",
+  // captured from error prose) being replayed as `--resume from`, which would
+  // fail every retry with "Session not found" and strand the run. A
+  // non-conforming stored ID is dropped so the run starts a fresh session.
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
-  if (persistSession && prevSessionId) {
+  if (persistSession && isValidSessionId(prevSessionId)) {
     args.push("--resume", prevSessionId);
+  } else if (persistSession && prevSessionId) {
+    await ctx.onLog(
+      "stderr",
+      `[hermes] WARNING: ignoring malformed stored session id "${prevSessionId}"; starting a fresh session.\n`,
+    );
   }
 
   if (extraArgs?.length) {
@@ -420,9 +490,14 @@ export async function execute(
   const taskId = cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+  // Inject agent-configured env vars. Only string values are merged; an
+  // unresolved secret_ref descriptor (or any non-string) is skipped and
+  // surfaced as a warning rather than coerced to "[object Object]" — see
+  // sanitizeUserEnv() for the full rationale.
+  const { env: userEnv, warnings: envWarnings } = sanitizeUserEnv(config.env);
+  Object.assign(env, userEnv);
+  for (const warning of envWarnings) {
+    await ctx.onLog("stderr", `[hermes] WARNING: ${warning}\n`);
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
@@ -523,8 +598,9 @@ export async function execute(
     cost_usd: parsed.costUsd ?? null,
   };
 
-  // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
+  // Store session ID for next run — only persist a well-formed ID so a bad
+  // capture can never be saved and replayed on the next `--resume`.
+  if (persistSession && isValidSessionId(parsed.sessionId)) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
