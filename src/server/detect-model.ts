@@ -24,6 +24,12 @@ export interface DetectedModel {
   apiMode: string;
   /** Where the detection came from */
   source: "config";
+  /**
+   * Top-level keys from the `providers:` section of ~/.hermes/config.yaml.
+   * These are user-defined named providers (e.g. "litellm", "ollama") that
+   * hermes accepts via --provider in addition to the built-in VALID_PROVIDERS.
+   */
+  configuredProviderNames: string[];
 }
 
 /**
@@ -45,8 +51,9 @@ export async function detectModel(
 }
 
 /**
- * Parse model.default, model.provider, model.base_url, and model.api_mode
- * from raw YAML content. Uses simple regex parsing to avoid a YAML dependency.
+ * Parse model.default, model.provider, model.base_url, model.api_mode, and
+ * top-level providers: keys from raw YAML content.
+ * Uses simple regex parsing to avoid a YAML dependency.
  */
 export function parseModelFromConfig(content: string): DetectedModel | null {
   const lines = content.split("\n");
@@ -56,6 +63,8 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
   let apiMode = "";
   let inModelSection = false;
   let modelSectionIndent = 0;
+  let inProvidersSection = false;
+  const configuredProviderNames: string[] = [];
 
   for (const line of lines) {
     const trimmed = line.trimEnd();
@@ -64,13 +73,22 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
     // Track model: section (indent 0)
     if (/^model:\s*$/.test(trimmed) && indent === 0) {
       inModelSection = true;
+      inProvidersSection = false;
       modelSectionIndent = 0;
       continue;
     }
 
-    // We left the model section if indent drops back to the section level or below
-    if (inModelSection && indent <= modelSectionIndent && trimmed && !trimmed.startsWith("#")) {
+    // Track providers: section (indent 0)
+    if (/^providers:\s*$/.test(trimmed) && indent === 0) {
+      inProvidersSection = true;
       inModelSection = false;
+      continue;
+    }
+
+    // Leave any section when a new top-level key appears
+    if (indent === 0 && trimmed && !trimmed.startsWith("#")) {
+      inModelSection = false;
+      inProvidersSection = false;
     }
 
     if (inModelSection) {
@@ -84,11 +102,20 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
         if (key === "api_mode") apiMode = val;
       }
     }
+
+    // Collect direct children of providers: (indent 2) as provider names.
+    // These are user-defined named providers hermes accepts via --provider.
+    if (inProvidersSection && indent === 2 && !trimmed.startsWith("#")) {
+      const keyMatch = trimmed.match(/^([\w-]+)\s*:/);
+      if (keyMatch) {
+        configuredProviderNames.push(keyMatch[1]);
+      }
+    }
   }
 
   if (!model) return null;
 
-  return { model, provider, baseUrl, apiMode, source: "config" };
+  return { model, provider, baseUrl, apiMode, source: "config", configuredProviderNames };
 }
 
 /**
@@ -125,6 +152,10 @@ export function inferProviderFromModel(model: string): string | undefined {
  *   3. Provider inferred from model name prefix
  *   4. "auto" (let Hermes figure it out — lowest priority)
  *
+ * A provider is considered valid if it appears in VALID_PROVIDERS (built-in) OR
+ * in `configuredProviderNames` (user-defined entries from ~/.hermes/config.yaml
+ * `providers:` dict, e.g. "litellm", "ollama").
+ *
  * Always returns a valid provider string.
  * The `resolvedFrom` field indicates which source was used, useful for logging.
  */
@@ -137,11 +168,21 @@ export function resolveProvider(options: {
   detectedModel?: string;
   /** Model name to infer from if no explicit/detected provider */
   model?: string;
+  /**
+   * User-defined provider names from ~/.hermes/config.yaml `providers:` dict.
+   * Populated by `detectModel()`. These are accepted in addition to VALID_PROVIDERS.
+   */
+  configuredProviderNames?: string[];
 }): { provider: string; resolvedFrom: string } {
-  const { explicitProvider, detectedProvider, detectedModel, model } = options;
+  const { explicitProvider, detectedProvider, detectedModel, model, configuredProviderNames } =
+    options;
+
+  const isKnownProvider = (p: string): boolean =>
+    (VALID_PROVIDERS as readonly string[]).includes(p) ||
+    (configuredProviderNames?.includes(p) ?? false);
 
   // 1. Explicit provider from adapterConfig — user override, always wins
-  if (explicitProvider && (VALID_PROVIDERS as readonly string[]).includes(explicitProvider)) {
+  if (explicitProvider && isKnownProvider(explicitProvider)) {
     return { provider: explicitProvider, resolvedFrom: "adapterConfig" };
   }
 
@@ -151,7 +192,7 @@ export function resolveProvider(options: {
   if (
     detectedProvider &&
     detectedModel &&
-    (VALID_PROVIDERS as readonly string[]).includes(detectedProvider) &&
+    isKnownProvider(detectedProvider) &&
     // Config model matches requested model (exact or case-insensitive)
     detectedModel.toLowerCase() === model?.toLowerCase()
   ) {

@@ -200,6 +200,7 @@ async function checkProviderConsistency(
     explicitProvider,
     detectedProvider: detectedConfig?.provider,
     detectedModel: detectedConfig?.model,
+    configuredProviderNames: detectedConfig?.configuredProviderNames,
     model,
   });
 

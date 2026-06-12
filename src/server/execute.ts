@@ -351,6 +351,7 @@ export async function execute(
     explicitProvider,
     detectedProvider: detectedConfig?.provider,
     detectedModel: detectedConfig?.model,
+    configuredProviderNames: detectedConfig?.configuredProviderNames,
     model,
   });
 
