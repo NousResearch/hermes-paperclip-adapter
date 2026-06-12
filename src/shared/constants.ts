@@ -21,8 +21,12 @@ export const DEFAULT_GRACE_SEC = 10;
 export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
 
 /**
- * Valid --provider choices for the hermes CLI.
+ * Built-in --provider choices for the hermes CLI.
  * Must stay in sync with `hermes chat --help`.
+ *
+ * User-defined named providers from ~/.hermes/config.yaml `providers:` dict
+ * (e.g. "litellm", "ollama") are accepted in addition to this list — see
+ * `DetectedModel.configuredProviderNames` and `resolveProvider`.
  */
 export const VALID_PROVIDERS = [
   "auto",
@@ -38,6 +42,8 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  // bare "custom" provider (OpenAI-compatible endpoint via model.base_url)
+  "custom",
 ] as const;
 
 /**
