@@ -450,7 +450,9 @@ export async function execute(
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
   // Paperclip renders all stderr as red/error in the UI.
   // Wrap onLog to reclassify benign stderr lines as stdout.
+  let lastHermesEmit = Date.now();
   const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
+    lastHermesEmit = Date.now();
     if (stream === "stderr") {
       const trimmed = chunk.trimEnd();
       // Benign patterns that should NOT appear as errors:
@@ -470,13 +472,27 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
+  // Keepalive: a long silent synthesis (Hermes composing a final answer with no
+  // tool calls) emits no stdout, so nothing is forwarded via onLog and Paperclip's
+  // run heartbeat (lastHeartbeatAt) goes stale. Paperclip then spawns a duplicate
+  // run that steals the issue's checkout lock, and the original run's write-back
+  // fails 409 (sameRunLock) then 401 — surfacing as adapter_failed +
+  // stranded_assigned_issue. Emit a benign keepalive line whenever Hermes has been
+  // quiet for >25s; any real Hermes output resets the timer (only fills genuine
+  // gaps). Cleared when the child settles.
+  const keepAlive = setInterval(() => {
+    if (Date.now() - lastHermesEmit >= 25_000) {
+      lastHermesEmit = Date.now();
+      void ctx.onLog("stdout", "[hermes] working…\n");
+    }
+  }, 10_000);
   const result = await runChildProcess(ctx.runId, hermesCmd, args, {
     cwd,
     env,
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,
-  });
+  }).finally(() => clearInterval(keepAlive));
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
