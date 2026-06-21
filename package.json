@@ -1,6 +1,6 @@
 {
   "name": "hermes-paperclip-adapter",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Paperclip adapter for Hermes Agent — run Hermes as a managed employee in a Paperclip company",
   "type": "module",
   "license": "MIT",
@@ -31,7 +31,8 @@
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run"
   },
   "dependencies": {
     "@paperclipai/adapter-utils": "^2026.325.0",
@@ -39,7 +40,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   },
   "engines": {
     "node": ">=20.0.0"

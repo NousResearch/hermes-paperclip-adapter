@@ -195,8 +195,47 @@ function buildPrompt(
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+/** Canonical Hermes session id shape: yyyyMMdd_HHmmss_<hex>. */
+const HERMES_SESSION_ID_SHAPE = /^\d{8}_\d{6}_[a-f0-9]+$/;
+
+/** Common English words that must never be treated as session ids. They leak
+ *  into the capture group when the legacy regex matches CLI help text such as
+ *  "Use a session ID from a previous CLI run" (see RUAAAAA-1977 / 2033). */
+const SESSION_ID_STOPWORDS: ReadonlySet<string> = new Set([
+  "from", "with", "for", "to", "in", "of", "on", "at", "by", "an", "a", "the",
+  "is", "it", "as", "or", "and", "use", "list", "previous", "cli", "run",
+  "session", "id", "saved", "please",
+]);
+
+/** Regex for legacy session output format. Tightened to require either a
+ *  colon/equals-delimited key (e.g. `session_id: <id>`, `session saved: <id>`,
+ *  `session_id=<id>`) or a leading line prefix like `[hermes]`, `[resume]`,
+ *  `Session saved:`. The capture group is also post-validated by
+ *  isPlausibleSessionId() which enforces the canonical shape and rejects
+ *  English stopwords. Exported for the regression test in
+ *  test/parseHermesOutput.test.ts. */
+export const SESSION_ID_REGEX_LEGACY =
+  /(?:^|\s)(?:\[(?:hermes|resume|paperclip)\]\s*)?(?:session[_ ](?:id|saved)\s*[:=]\s*)([a-zA-Z0-9_-]+)/i;
+
+/** Returns true when a candidate session id is structurally plausible:
+ *  matches the canonical Hermes shape AND is not a single common English
+ *  word. Defends against the legacy regex matching CLI help text and
+ *  capturing the literal word `from`. */
+export function isPlausibleSessionId(candidate: unknown): candidate is string {
+  if (typeof candidate !== "string" || candidate.length === 0) {
+    return false;
+  }
+  if (HERMES_SESSION_ID_SHAPE.test(candidate)) {
+    return true;
+  }
+  if (/^[a-z]+$/.test(candidate) && SESSION_ID_STOPWORDS.has(candidate)) {
+    return false;
+  }
+  // Any other shape is rejected by default — the adapter only ever expects
+  // canonical Hermes session ids. Defense in depth: refuse unknown shapes
+  // rather than pass them to `hermes resume` and risk a runaway loop.
+  return false;
+}
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
@@ -211,6 +250,7 @@ interface ParsedOutput {
   usage?: UsageSummary;
   costUsd?: number;
   errorMessage?: string;
+  warnings?: Array<{ kind: string; [k: string]: unknown }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,8 +305,19 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   } else {
     // Legacy format (non-quiet mode)
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    if (legacyMatch?.[1] && isPlausibleSessionId(legacyMatch[1])) {
+      result.sessionId = legacyMatch[1];
+    } else if (legacyMatch?.[1]) {
+      // The legacy regex captured a value that fails the strict shape
+      // check. Surface it as a warning so the misclassification is
+      // observable in the run log. Do NOT persist it as sessionId.
+      result.sessionId = undefined;
+      result.warnings = (result.warnings ?? []);
+      result.warnings.push({
+        kind: "session_id_rejected",
+        captured: legacyMatch[1],
+        reason: "failed_canonical_shape_check",
+      });
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -397,9 +448,25 @@ export async function execute(
   args.push("--yolo");
 
   // Session resume
-  const prevSessionId = cfgString(
+  // Defense in depth: even if a previous run persisted a malformed
+  // prevSessionId (e.g. the literal "from" captured from CLI help text, or
+  // a truncated suffix like "20260619_110651_"), refuse to pass it to
+  // `hermes resume`. Drop --resume and start fresh; emit a structured
+  // warning so the misclassification is observable.
+  const rawPrevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
+  const prevSessionId = isPlausibleSessionId(rawPrevSessionId)
+    ? rawPrevSessionId
+    : undefined;
+  if (rawPrevSessionId && !prevSessionId && ctx.runtime?.sessionParams) {
+    // Surface the rejection in the structured env so downstream tooling
+    // can correlate this run with the originating wake payload.
+    (ctx.runtime.sessionParams as Record<string, unknown>).resumeRejected = {
+      captured: rawPrevSessionId,
+      reason: "failed_canonical_shape_check_at_resume_guard",
+    };
+  }
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
@@ -443,6 +510,11 @@ export async function execute(
     await ctx.onLog(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,
+    );
+  } else if (rawPrevSessionId) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Skipping --resume: rejected prevSessionId=${rawPrevSessionId} (failed canonical shape check; starting fresh)\n`,
     );
   }
 
