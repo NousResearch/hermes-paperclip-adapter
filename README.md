@@ -106,8 +106,8 @@ Create issues in Paperclip and assign them to your Hermes agent. On each heartbe
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | `anthropic/claude-sonnet-4` | Model in `provider/model` format |
-| `provider` | string | *(auto-detected)* | API provider: `auto`, `openrouter`, `nous`, `openai-codex`, `zai`, `kimi-coding`, `minimax`, `minimax-cn` |
+| `model` | string | *(Hermes configured default)* | Optional model override. Leave blank to use the selected Hermes profile/default config. |
+| `provider` | string | *(auto-detected)* | API provider: built-in provider such as `auto`, `openrouter`, `nous`, `openai-codex`, `zai`, `kimi-coding`, `minimax`, `minimax-cn`, or a custom provider defined in Hermes `config.yaml`. |
 | `timeoutSec` | number | `300` | Execution timeout in seconds |
 | `graceSec` | number | `10` | Grace period before SIGKILL |
 
