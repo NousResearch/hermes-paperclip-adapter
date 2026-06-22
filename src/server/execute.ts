@@ -476,6 +476,14 @@ export async function execute(
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,
+    // Forward the spawned PID so the orchestrator can track process liveness.
+    // Without this, Paperclip never learns the child pid and its run-recovery
+    // falls back to output-silence detection. Because Hermes runs in quiet
+    // mode (`-Q`) and emits little mid-run, long runs cross the silence
+    // threshold and get falsely marked `process_lost` (and retried) even
+    // though Hermes is alive and exits 0. Reporting the pid lets recovery
+    // verify the actual process instead.
+    onSpawn: ctx.onSpawn,
   });
 
   // ── Parse output ───────────────────────────────────────────────────────
