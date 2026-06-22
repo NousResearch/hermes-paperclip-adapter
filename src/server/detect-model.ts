@@ -11,7 +11,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { MODEL_PREFIX_PROVIDER_HINTS, VALID_PROVIDERS } from "../shared/constants.js";
+import { MODEL_PREFIX_PROVIDER_HINTS } from "../shared/constants.js";
 
 export interface DetectedModel {
   /** Model name from config (e.g. "gpt-5.4", "anthropic/claude-sonnet-4") */
@@ -125,7 +125,8 @@ export function inferProviderFromModel(model: string): string | undefined {
  *   3. Provider inferred from model name prefix
  *   4. "auto" (let Hermes figure it out — lowest priority)
  *
- * Always returns a valid provider string.
+ * Always returns a provider string. The value can be one of Hermes' built-in
+ * providers or a user-defined provider from config.yaml.
  * The `resolvedFrom` field indicates which source was used, useful for logging.
  */
 export function resolveProvider(options: {
@@ -140,8 +141,10 @@ export function resolveProvider(options: {
 }): { provider: string; resolvedFrom: string } {
   const { explicitProvider, detectedProvider, detectedModel, model } = options;
 
-  // 1. Explicit provider from adapterConfig — user override, always wins
-  if (explicitProvider && (VALID_PROVIDERS as readonly string[]).includes(explicitProvider)) {
+  // 1. Explicit provider from adapterConfig — user override, always wins.
+  // Hermes supports user-defined providers from config.yaml, so do not
+  // restrict this to the adapter's built-in provider list.
+  if (explicitProvider) {
     return { provider: explicitProvider, resolvedFrom: "adapterConfig" };
   }
 
@@ -151,7 +154,6 @@ export function resolveProvider(options: {
   if (
     detectedProvider &&
     detectedModel &&
-    (VALID_PROVIDERS as readonly string[]).includes(detectedProvider) &&
     // Config model matches requested model (exact or case-insensitive)
     detectedModel.toLowerCase() === model?.toLowerCase()
   ) {
