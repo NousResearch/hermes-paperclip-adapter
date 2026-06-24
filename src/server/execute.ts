@@ -87,6 +87,15 @@ Your Paperclip identity:
   Company ID: {{companyId}}
   API Base: {{paperclipApiUrl}}
 
+{{#instruction}}
+## Paperclip Run Instruction
+
+{{instruction}}
+
+This instruction is authoritative for this wake. If it conflicts with the
+generic workflow below, follow this instruction first.
+{{/instruction}}
+
 {{#taskId}}
 ## Assigned Task
 
@@ -153,6 +162,7 @@ function buildPrompt(
   const taskTitle = cfgString(ctx.config?.taskTitle) || "";
   const taskBody = cfgString(ctx.config?.taskBody) || "";
   const commentId = cfgString(ctx.config?.commentId) || "";
+  const instruction = cfgString(ctx.config?.instruction) || "";
   const wakeReason = cfgString(ctx.config?.wakeReason) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
   const companyName = cfgString(ctx.config?.companyName) || "";
@@ -170,6 +180,7 @@ function buildPrompt(
     taskTitle,
     taskBody,
     commentId,
+    instruction,
     wakeReason,
     projectName,
     paperclipApiUrl,
@@ -194,6 +205,13 @@ function buildPrompt(
   rendered = rendered.replace(
     /\{\{#commentId\}\}([\s\S]*?)\{\{\/commentId\}\}/g,
     commentId ? "$1" : "",
+  );
+
+  // {{#instruction}}...{{/instruction}} — include if Paperclip supplied a
+  // wake-specific instruction, e.g. missing-disposition recovery.
+  rendered = rendered.replace(
+    /\{\{#instruction\}\}([\s\S]*?)\{\{\/instruction\}\}/g,
+    instruction ? "$1" : "",
   );
 
   // Replace remaining {{variable}} placeholders
