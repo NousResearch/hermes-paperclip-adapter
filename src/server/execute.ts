@@ -63,6 +63,17 @@ function cfgStringArray(v: unknown): string[] | undefined {
     : undefined;
 }
 
+function resolvePaperclipApiUrl(config: Record<string, unknown>): string {
+  let paperclipApiUrl =
+    cfgString(config.paperclipApiUrl) ||
+    process.env.PAPERCLIP_API_URL ||
+    "http://127.0.0.1:3100/api";
+  if (!paperclipApiUrl.endsWith("/api")) {
+    paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
+  }
+  return paperclipApiUrl;
+}
+
 // ---------------------------------------------------------------------------
 // Wake-up prompt builder
 // ---------------------------------------------------------------------------
@@ -87,12 +98,16 @@ Title: {{taskTitle}}
 ## Workflow
 
 1. Work on the task using your tools
-2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
-3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
-4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+2. Before every Paperclip write, include this header exactly:
+   \`-H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"\`
+3. When done, record the issue disposition atomically with a status and comment:
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done","comment":"DONE: <summary, evidence, and next step>"}'\`
+4. If work must continue later, still record a clear disposition instead of ending silently:
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"in_progress","comment":"Status: in_progress. Completed: <what changed>. Next action: <specific next check/action and owner>."}'\`
+5. If blocked, set blocked with a blocker explanation:
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"blocked","comment":"BLOCKED: <blocker>. Unblock owner/action: <owner/action>."}'\`
+6. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
 {{#commentId}}
@@ -113,12 +128,17 @@ Address the comment, POST a reply if needed, then continue working.
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
    - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
    - Do the work in the project directory: {{projectName}}
-   - When done, mark complete and post a comment (see Workflow steps 2-4 above)
+   - When done, record a clear disposition. Do not end a successful run without a status/comment disposition:
+     \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"status":"done","comment":"DONE: <summary, evidence, and next step>"}'\`
+   - If work must continue later, record the next action instead of ending silently:
+     \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"status":"in_progress","comment":"Status: in_progress. Completed: <what changed>. Next action: <specific next check/action and owner>."}'\`
+   - If blocked, set blocked with the unblock owner/action:
+     \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"status":"blocked","comment":"BLOCKED: <blocker>. Unblock owner/action: <owner/action>."}'\`
 
 3. If no issues assigned to you, check for unassigned issues:
    \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
    If you find a relevant issue, assign it to yourself:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo","comment":"Claiming this issue for {{agentName}}."}'\`
 
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
@@ -138,15 +158,7 @@ function buildPrompt(
   const companyName = cfgString(ctx.config?.companyName) || "";
   const projectName = cfgString(ctx.config?.projectName) || "";
 
-  // Build API URL — ensure it has the /api path
-  let paperclipApiUrl =
-    cfgString(config.paperclipApiUrl) ||
-    process.env.PAPERCLIP_API_URL ||
-    "http://127.0.0.1:3100/api";
-  // Ensure /api suffix
-  if (!paperclipApiUrl.endsWith("/api")) {
-    paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
-  }
+  const paperclipApiUrl = resolvePaperclipApiUrl(config);
 
   const vars: Record<string, unknown> = {
     agentId: ctx.agent?.id || "",
@@ -414,16 +426,23 @@ export async function execute(
     ...buildPaperclipEnv(ctx.agent),
   };
 
-  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
-    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
-  if (taskId) env.PAPERCLIP_TASK_ID = taskId;
-
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
     Object.assign(env, userEnv);
   }
+
+  // Paperclip run identity must be authoritative over inherited server env or
+  // adapterConfig.env. Otherwise agents can inherit a global/user API key and
+  // write outside their own authorization boundary.
+  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+  if ((ctx as any).authToken) {
+    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
+  }
+  const paperclipApiUrl = resolvePaperclipApiUrl(config);
+  env.PAPERCLIP_BASE_URL = paperclipApiUrl;
+  env.PAPERCLIP_API_BASE_URL = paperclipApiUrl;
+  const taskId = cfgString(ctx.config?.taskId);
+  if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
