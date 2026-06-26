@@ -285,8 +285,11 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     };
   }
 
-  // Extract cost
-  const costMatch = combined.match(COST_REGEX);
+  // Extract cost — ONLY from stderr, never from stdout.
+  // stdout contains agent response text (issue data, email bodies, etc.)
+  // that can produce false positives like "Cost: 1950/-" from old emails.
+  // Hermes outputs session metadata to stderr; cost data lives there if present.
+  const costMatch = stderr.match(COST_REGEX);
   if (costMatch?.[1]) {
     result.costUsd = parseFloat(costMatch[1]);
   }
