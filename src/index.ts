@@ -10,6 +10,14 @@
  */
 
 import { ADAPTER_TYPE, ADAPTER_LABEL } from "./shared/constants.js";
+import {
+  execute,
+  testEnvironment,
+  detectModel,
+  listSkills,
+  syncSkills,
+  sessionCodec,
+} from "./server/index.js";
 
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
@@ -82,3 +90,19 @@ tools, persistent memory, session persistence, skills, and MCP support.
 - \`{{taskBody}}\` — Task description (if assigned)
 - \`{{projectName}}\` — Project name (if scoped to a project)
 `;
+
+export function createServerAdapter() {
+  return {
+    type,
+    label,
+    models,
+    agentConfigurationDoc,
+    execute,
+    testEnvironment,
+    detectModel,
+    listSkills,
+    syncSkills,
+    sessionCodec,
+    supportsLocalAgentJwt: true,
+  };
+}
