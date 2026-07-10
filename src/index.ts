@@ -51,6 +51,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | toolsets | string | (all) | Comma-separated toolsets to enable (e.g. "terminal,file,web") |
+| image | string | (none) | Local image path to attach to the query for an image-capable model such as MiniMax-M3 |
 
 ## Session & Workspace
 
