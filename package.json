@@ -1,7 +1,7 @@
 {
   "name": "hermes-paperclip-adapter",
   "version": "0.3.0",
-  "description": "Paperclip adapter for Hermes Agent — run Hermes as a managed employee in a Paperclip company",
+  "description": "Paperclip adapter for Hermes Agent \u2014 run Hermes as a managed employee in a Paperclip company",
   "type": "module",
   "license": "MIT",
   "author": "Nous Research",
@@ -34,7 +34,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@paperclipai/adapter-utils": "^2026.325.0",
+    "@paperclipai/adapter-utils": "^2026.529.0",
     "picocolors": "^1.1.0"
   },
   "devDependencies": {
