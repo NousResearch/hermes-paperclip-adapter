@@ -148,7 +148,7 @@ function checkApiKeys(
   const hasAnthropic = has("ANTHROPIC_API_KEY");
   const hasOpenRouter = has("OPENROUTER_API_KEY");
   const hasOpenAI = has("OPENAI_API_KEY");
-  const hasZai = has("ZAI_API_KEY");
+  const hasZai = has("ZAI_API_KEY") || has("GLM_API_KEY") || has("Z_AI_API_KEY");
   const hasKimi = has("KIMI_API_KEY");
   const hasMiniMax = has("MINIMAX_API_KEY");
 
@@ -156,7 +156,7 @@ function checkApiKeys(
     return {
       level: "warn",
       message: "No LLM API keys found in environment",
-      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
+      hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, GLM_API_KEY, ZAI_API_KEY, Z_AI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
       code: "hermes_no_api_keys",
     };
   }
@@ -165,7 +165,7 @@ function checkApiKeys(
   if (hasAnthropic) providers.push("Anthropic");
   if (hasOpenRouter) providers.push("OpenRouter");
   if (hasOpenAI) providers.push("OpenAI");
-  if (hasZai) providers.push("Z.AI");
+  if (hasZai) providers.push("Z.AI / GLM");
   if (hasKimi) providers.push("Kimi");
   if (hasMiniMax) providers.push("MiniMax");
 
