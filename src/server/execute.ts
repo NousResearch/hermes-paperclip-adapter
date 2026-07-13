@@ -29,6 +29,7 @@ import {
   buildPaperclipEnv,
   renderTemplate,
   ensureAbsoluteDirectory,
+  stringifyPaperclipWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
 
 import {
@@ -61,6 +62,23 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+/**
+ * Read a Paperclip wake-context field from the runtime invocation context
+ * (`ctx.context`), which is where Paperclip delivers taskId/wakeReason/
+ * commentId/paperclipWake for a scoped wake — falling back to the legacy
+ * adapterConfig (`ctx.config`) for backward compatibility.
+ *
+ * This mirrors the field path used by codex-local, pi-local, gemini-local,
+ * grok-local, acpx-local, opencode-local, cursor-local, cursor-cloud and
+ * openclaw-gateway. The previous implementation read `ctx.config.taskId`,
+ * which is the agent's static adapterConfig and is empty for scoped wakes.
+ */
+function wakeCtxString(ctx: AdapterExecutionContext, key: string): string {
+  const fromContext = cfgString(ctx.context?.[key]);
+  if (fromContext) return fromContext;
+  return cfgString(ctx.config?.[key]) ?? "";
 }
 
 // ---------------------------------------------------------------------------
@@ -129,11 +147,11 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const taskId = wakeCtxString(ctx, "taskId");
+  const taskTitle = wakeCtxString(ctx, "taskTitle");
+  const taskBody = wakeCtxString(ctx, "taskBody");
+  const commentId = wakeCtxString(ctx, "commentId");
+  const wakeReason = wakeCtxString(ctx, "wakeReason");
   const agentName = ctx.agent?.name || "Hermes Agent";
   const companyName = cfgString(ctx.config?.companyName) || "";
   const projectName = cfgString(ctx.config?.projectName) || "";
@@ -417,8 +435,19 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+
+  // Scoped-wake context: Paperclip delivers taskId/wakeReason/commentId/
+  // paperclipWake in `ctx.context` (NOT the static adapterConfig `ctx.config`).
+  const taskId = wakeCtxString(ctx, "taskId") || wakeCtxString(ctx, "issueId");
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
+  const wakeReason = wakeCtxString(ctx, "wakeReason");
+  if (wakeReason) env.PAPERCLIP_WAKE_REASON = wakeReason;
+  const wakeCommentId = wakeCtxString(ctx, "wakeCommentId") || wakeCtxString(ctx, "commentId");
+  if (wakeCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = wakeCommentId;
+  const wakePayloadJson = stringifyPaperclipWakePayload(
+    ctx.context?.paperclipWake ?? ctx.config?.paperclipWake,
+  );
+  if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
 
   const userEnv = config.env as Record<string, string> | undefined;
   if (userEnv && typeof userEnv === "object") {
