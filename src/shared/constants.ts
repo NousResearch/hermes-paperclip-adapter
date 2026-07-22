@@ -38,6 +38,8 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  "xai",
+  "xai-oauth",
 ] as const;
 
 /**
@@ -68,6 +70,9 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
   ["kimi", "kimi-coding"],
   // MiniMax
   ["minimax", "minimax"],
+  // xAI / Grok
+  ["grok-", "xai-oauth"],
+  ["grok/", "xai-oauth"],
   // DeepSeek
   ["deepseek", "auto"],
   // Meta Llama
