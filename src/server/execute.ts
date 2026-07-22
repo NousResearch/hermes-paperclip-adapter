@@ -192,11 +192,20 @@ function buildPrompt(
 // Output parsing
 // ---------------------------------------------------------------------------
 
+const HERMES_SESSION_ID_PATTERN = "\\d{8}_\\d{6}_[a-fA-F0-9]+";
+
+function isValidHermesSessionId(value: string | undefined): value is string {
+  return typeof value === "string" && new RegExp(`^${HERMES_SESSION_ID_PATTERN}$`).test(value);
+}
+
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
-const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
+const SESSION_ID_REGEX = new RegExp(`^session_id:\\s*(${HERMES_SESSION_ID_PATTERN})\\s*$`, "m");
 
 /** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+const SESSION_ID_REGEX_LEGACY = new RegExp(
+  `session[_ ](?:id|saved)[:\\s]+(${HERMES_SESSION_ID_PATTERN})`,
+  "i",
+);
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
@@ -254,19 +263,21 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   //   <response text>
   //
   //   session_id: <id>
-  const sessionMatch = stdout.match(SESSION_ID_REGEX);
-  if (sessionMatch?.[1]) {
-    result.sessionId = sessionMatch?.[1] ?? null;
-    // The response is everything before the session_id line
-    const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
-    if (sessionLineIdx > 0) {
-      result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
-    }
+  const sessionMatch = combined.match(SESSION_ID_REGEX);
+  if (isValidHermesSessionId(sessionMatch?.[1])) {
+    result.sessionId = sessionMatch[1];
+  }
+
+  // Response text always comes from stdout. In quiet mode Hermes may emit the
+  // canonical session line on stderr, so never use its stream location to
+  // decide whether stdout should be cleaned.
+  const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
+  if (sessionLineIdx > 0) {
+    result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
   } else {
-    // Legacy format (non-quiet mode)
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    if (!result.sessionId && isValidHermesSessionId(legacyMatch?.[1])) {
+      result.sessionId = legacyMatch[1];
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -397,9 +408,10 @@ export async function execute(
   args.push("--yolo");
 
   // Session resume
-  const prevSessionId = cfgString(
+  const rawSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
+  const prevSessionId = isValidHermesSessionId(rawSessionId) ? rawSessionId : undefined;
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
@@ -485,8 +497,12 @@ export async function execute(
     "stdout",
     `[hermes] Exit code: ${result.exitCode ?? "null"}, timed out: ${result.timedOut}\n`,
   );
-  if (parsed.sessionId) {
-    await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
+  const parsedSessionId = result.exitCode === 0 && isValidHermesSessionId(parsed.sessionId)
+    ? parsed.sessionId
+    : undefined;
+
+  if (parsedSessionId) {
+    await ctx.onLog("stdout", `[hermes] Session: ${parsedSessionId}\n`);
   }
 
   // ── Build result ───────────────────────────────────────────────────────
@@ -518,15 +534,15 @@ export async function execute(
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
     result: parsed.response || "",
-    session_id: parsed.sessionId || null,
+    session_id: parsedSessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
   };
 
   // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  if (persistSession && parsedSessionId) {
+    executionResult.sessionParams = { sessionId: parsedSessionId };
+    executionResult.sessionDisplayId = parsedSessionId;
   }
 
   return executionResult;
