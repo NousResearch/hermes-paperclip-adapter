@@ -242,11 +242,31 @@ function cleanResponse(raw: string): string {
     .trim();
 }
 
+/**
+ * Extract only the terminal assistant response from streamed Hermes output.
+ * Verbose runs include startup, prompt, reasoning, and tool logs on stdout;
+ * `┊ 💬` marks terminal assistant output. Quiet-mode output has no marker, so
+ * retain its cleaned response unchanged.
+ */
+function extractTerminalResponse(stdout: string): string {
+  const assistantLines = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^(?:\[done\]\s*)?┊\s*💬/u.test(line))
+    .map((line) => line
+      .replace(/^\[done\]\s*/, "")
+      .replace(/^┊\s*💬\s*/, "")
+      .trim())
+    .filter(Boolean);
+
+  return assistantLines.length > 0 ? assistantLines.join("\n") : cleanResponse(stdout);
+}
+
 // ---------------------------------------------------------------------------
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -260,7 +280,7 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     // The response is everything before the session_id line
     const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
     if (sessionLineIdx > 0) {
-      result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
+      result.response = extractTerminalResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
     // Legacy format (non-quiet mode)
@@ -270,7 +290,7 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
-    const cleaned = cleanResponse(stdout);
+    const cleaned = extractTerminalResponse(stdout);
     if (cleaned.length > 0) {
       result.response = cleaned;
     }
