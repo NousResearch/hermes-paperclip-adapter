@@ -383,7 +383,10 @@ export async function execute(
 
   if (worktreeMode) args.push("-w");
   if (checkpoints) args.push("--checkpoints");
-  if (cfgBoolean(config.verbose) === true) args.push("-v");
+  // `-v` makes Hermes write bootstrap, reasoning, and tool frames to stdout.
+  // Paperclip promotes the parsed response into the terminal issue comment, so
+  // never combine verbose stdout with quiet publication mode.
+  if (!useQuiet && cfgBoolean(config.verbose) === true) args.push("-v");
 
   // Tag sessions as "tool" source so they don't clutter the user's session history.
   // Requires hermes-agent >= PR #3255 (feat/session-source-tag).
