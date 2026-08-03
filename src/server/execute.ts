@@ -24,11 +24,15 @@ import type {
   UsageSummary,
 } from "@paperclipai/adapter-utils";
 
+import { execFile as execFileCallback } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { promisify } from "node:util";
+
 import {
   runChildProcess,
   buildPaperclipEnv,
   renderTemplate,
-  ensureAbsoluteDirectory,
 } from "@paperclipai/adapter-utils/server-utils";
 
 import {
@@ -61,6 +65,111 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+const execFile = promisify(execFileCallback);
+
+function sanitizeWorkspacePath(value: string | undefined): string {
+  if (!value) return "<unset>";
+  const home = homedir();
+  return value === home || value.startsWith(`${home}/`)
+    ? `~${value.slice(home.length)}`
+    : value;
+}
+
+function sanitizeOrigin(value: string | undefined): string {
+  if (!value) return "<unavailable>";
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return value.replace(/^[^@\s]+@/, "");
+  }
+}
+
+async function readGitValue(cwd: string, args: string[]): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFile("git", ["-C", cwd, ...args], { encoding: "utf8" });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function workspaceError(
+  reason: string,
+  details: { cwd?: string; branch?: string; origin?: string; explicitCwd?: string },
+): Error {
+  const explicit = details.explicitCwd
+    ? `, explicit_cwd=${sanitizeWorkspacePath(details.explicitCwd)}`
+    : "";
+  return new Error(
+    `[hermes] Workspace verification failed: ${reason}; cwd=${sanitizeWorkspacePath(details.cwd)}, branch=${details.branch || "<unavailable>"}, origin=${sanitizeOrigin(details.origin)}${explicit}`,
+  );
+}
+
+/**
+ * Resolve Paperclip's realized workspace identity before starting Hermes.
+ * Adapter-supplied cwd values are accepted only when they resolve to the same
+ * filesystem identity as the registered workspace.
+ */
+export async function resolveVerifiedWorkspaceCwd(options: {
+  workspaceCwd?: string;
+  workspaceBranch?: string;
+  explicitCwds?: Array<string | undefined>;
+}): Promise<string> {
+  const registeredCwd = options.workspaceCwd;
+  if (!registeredCwd) {
+    throw workspaceError("PAPERCLIP_WORKSPACE_CWD is required", {});
+  }
+
+  let cwd: string;
+  try {
+    cwd = await realpath(registeredCwd);
+  } catch {
+    throw workspaceError("registered cwd does not exist", { cwd: registeredCwd });
+  }
+
+  const isWorktree = await readGitValue(cwd, ["rev-parse", "--is-inside-work-tree"]);
+  const branch = await readGitValue(cwd, ["branch", "--show-current"]);
+  const origin = await readGitValue(cwd, ["config", "--get", "remote.origin.url"]);
+  if (isWorktree !== "true") {
+    throw workspaceError("registered cwd is not a Git worktree", { cwd, branch, origin });
+  }
+  if (options.workspaceBranch && branch !== options.workspaceBranch) {
+    throw workspaceError("checked-out branch does not match PAPERCLIP_WORKSPACE_BRANCH", {
+      cwd,
+      branch,
+      origin,
+    });
+  }
+
+  for (const explicitCwd of options.explicitCwds ?? []) {
+    if (!explicitCwd) continue;
+    let resolvedExplicitCwd: string;
+    try {
+      resolvedExplicitCwd = await realpath(explicitCwd);
+    } catch {
+      throw workspaceError("explicit adapter cwd does not exist", {
+        cwd,
+        branch,
+        origin,
+        explicitCwd,
+      });
+    }
+    if (resolvedExplicitCwd !== cwd) {
+      throw workspaceError("explicit adapter cwd does not match registered workspace", {
+        cwd,
+        branch,
+        origin,
+        explicitCwd: resolvedExplicitCwd,
+      });
+    }
+  }
+
+  return cwd;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +420,7 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
 
 export async function execute(
   ctx: AdapterExecutionContext,
+  childProcessRunner: typeof runChildProcess = runChildProcess,
 ): Promise<AdapterExecutionResult> {
   const config = (ctx.config ?? ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
 
@@ -425,13 +535,35 @@ export async function execute(
     Object.assign(env, userEnv);
   }
 
+  // The control plane owns the realized workspace identity. Do not allow an
+  // adapter-configured environment override to redirect a child process.
+  const workspaceCwd = cfgString(process.env.PAPERCLIP_WORKSPACE_CWD);
+  const workspaceBranch = cfgString(process.env.PAPERCLIP_WORKSPACE_BRANCH);
+  if (workspaceCwd) env.PAPERCLIP_WORKSPACE_CWD = workspaceCwd;
+  if (workspaceBranch) env.PAPERCLIP_WORKSPACE_BRANCH = workspaceBranch;
+
   // ── Resolve working directory ──────────────────────────────────────────
-  const cwd =
-    cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
+  let cwd: string;
   try {
-    await ensureAbsoluteDirectory(cwd);
-  } catch {
-    // Non-fatal
+    cwd = await resolveVerifiedWorkspaceCwd({
+      workspaceCwd,
+      workspaceBranch,
+      explicitCwds: [
+        cfgString(config.cwd),
+        cfgString(ctx.config?.workspaceDir),
+      ],
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "[hermes] Workspace verification failed";
+    await ctx.onLog("stderr", `${errorMessage}\n`);
+    return {
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      provider: resolvedProvider,
+      model,
+      errorMessage,
+    };
   }
 
   // ── Log start ──────────────────────────────────────────────────────────
@@ -470,7 +602,7 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
+  const result = await childProcessRunner(ctx.runId, hermesCmd, args, {
     cwd,
     env,
     timeoutSec,
