@@ -28,6 +28,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test dist/server/execute.test.js",
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
