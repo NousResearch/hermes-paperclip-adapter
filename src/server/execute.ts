@@ -62,6 +62,55 @@ function cfgStringArray(v: unknown): string[] | undefined {
     ? (v as string[])
     : undefined;
 }
+function splitGlobalExtraArgs(v: unknown): {
+  preCommandArgs: string[];
+  postCommandArgs: string[];
+} {
+  if (!Array.isArray(v) || v.length === 0) {
+    return { preCommandArgs: [], postCommandArgs: [] };
+  }
+
+  const preCommandArgs: string[] = [];
+  const postCommandArgs: string[] = [];
+
+  for (let i = 0; i < v.length; i += 1) {
+    const arg = v[i];
+    if (typeof arg !== "string") continue;
+
+    if (arg === "--profile" || arg === "-p") {
+      preCommandArgs.push(arg);
+      const next = v[i + 1];
+      if (typeof next === "string" && next.length > 0) {
+        preCommandArgs.push(next);
+        i += 1;
+      }
+      continue;
+    }
+
+    if (arg.startsWith("--profile=") || arg.startsWith("-p=")) {
+      preCommandArgs.push(arg);
+      continue;
+    }
+
+    postCommandArgs.push(arg);
+  }
+
+  return { preCommandArgs, postCommandArgs };
+}
+
+export function hasProfileArg(args: string[]): boolean {
+  return args.some(
+    (arg) =>
+      arg === "--profile" ||
+      arg === "-p" ||
+      arg.startsWith("--profile=") ||
+      arg.startsWith("-p="),
+  );
+}
+
+export function buildModelArgs(model: string): string[] {
+  return model === "auto" ? [] : ["-m", model];
+}
 
 // ---------------------------------------------------------------------------
 // Wake-up prompt builder
@@ -316,12 +365,15 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  const modelConfig = cfgString(config.model);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
+  const { preCommandArgs, postCommandArgs } = splitGlobalExtraArgs(extraArgs);
+  const profileSelected = hasProfileArg(preCommandArgs);
+  const model = profileSelected ? "auto" : modelConfig || DEFAULT_MODEL;
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
@@ -339,7 +391,7 @@ export async function execute(
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
 
-  if (!explicitProvider) {
+  if (!explicitProvider && !profileSelected) {
     try {
       detectedConfig = await detectModel();
     } catch {
@@ -360,12 +412,10 @@ export async function execute(
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) !== false; // default true
-  const args: string[] = ["chat", "-q", prompt];
+  const args: string[] = [...preCommandArgs, "chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
-  if (model) {
-    args.push("-m", model);
-  }
+  args.push(...buildModelArgs(model));
 
   // Always pass --provider when we have a resolved one (not "auto").
   // "auto" means Hermes will decide on its own — no need to pass it.
@@ -404,8 +454,8 @@ export async function execute(
     args.push("--resume", prevSessionId);
   }
 
-  if (extraArgs?.length) {
-    args.push(...extraArgs);
+  if (postCommandArgs.length) {
+    args.push(...postCommandArgs);
   }
 
   // ── Build environment ──────────────────────────────────────────────────
