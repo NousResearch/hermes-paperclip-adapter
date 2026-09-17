@@ -21,7 +21,12 @@ export const label = ADAPTER_LABEL;
  * prefer detectModel() plus manual entry over curated placeholder models,
  * since Hermes availability depends on the user's local configuration.
  */
-export const models: { id: string; label: string }[] = [];
+export const models: { id: string; label: string }[] = [
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+  { id: "deepseek/deepseek-chat", label: "DeepSeek Chat (V3)" },
+  { id: "deepseek/deepseek-reasoner", label: "DeepSeek Reasoner (R1)" }
+];
 
 /**
  * Documentation shown in the Paperclip UI when configuring a Hermes agent.
@@ -57,6 +62,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | persistSession | boolean | true | Resume sessions across heartbeats |
+| freshSessionOnBannerOnly | boolean | true | Drop the session when a resumed run produces only the startup banner (stale-session fingerprint), so the next run starts fresh. Set false to always keep sessions. |
 | worktreeMode | boolean | false | Use git worktree for isolated changes |
 | checkpoints | boolean | false | Enable filesystem checkpoints |
 

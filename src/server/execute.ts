@@ -76,15 +76,37 @@ Your Paperclip identity:
   Company ID: {{companyId}}
   API Base: {{paperclipApiUrl}}
 
+{{#wakeReason}}
+Wake reason: {{wakeReason}}
+{{/wakeReason}}
+
+{{#commentId}}
+## 🚨 USER MESSAGE — THIS IS YOUR NEW TASK
+
+You were woken by a comment from the user (@ficho12 / Board). Their message IS your new
+highest-priority task. DROP any automated workflow or routine — do what the user asks
+BEFORE anything else. Only after fully addressing the user's request should you consider
+resuming any routine workflow.
+
+Read the user's message:
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
+
+Read ALL recent comments too (the user may have left multiple messages):
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments?limit=10" | python3 -c "import sys,json; [print(c['authorName'],':',c['body'][:200]) for c in json.load(sys.stdin) if c.get('authorType')=='user']"\`
+
+DO what the user asked. If you need clarification, POST a reply comment. When done,
+post a reply comment summarizing what you did.
+{{/commentId}}
+
 {{#taskId}}
-## Assigned Task
+## Background Task (routine)
 
 Issue ID: {{taskId}}
 Title: {{taskTitle}}
 
 {{taskBody}}
 
-## Workflow
+## Workflow (only if no user message above)
 
 1. Work on the task using your tools
 2. When done, mark the issue as completed:
@@ -94,15 +116,6 @@ Title: {{taskTitle}}
 4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
-
-{{#commentId}}
-## Comment on This Issue
-
-Someone commented. Read it:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
-
-Address the comment, POST a reply if needed, then continue working.
-{{/commentId}}
 
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
@@ -129,14 +142,18 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Paperclip 2026.513.0+ puts task context in ctx.context, adapter config in ctx.config.
+  // Fall back to ctx.config for backwards compatibility with older versions.
+  const taskCtx = (ctx.context ?? ctx.config ?? {}) as Record<string, unknown>;
+
+  const taskId = cfgString(taskCtx.taskId);
+  const taskTitle = cfgString(taskCtx.taskTitle) || "";
+  const taskBody = cfgString(taskCtx.paperclipTaskMarkdown) || cfgString(taskCtx.taskBody) || "";
+  const commentId = cfgString(taskCtx.commentId) || "";
+  const wakeReason = cfgString(taskCtx.wakeReason) || "";
+  const companyName = cfgString(taskCtx.companyName) || "";
+  const projectName = cfgString(taskCtx.projectName) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -166,6 +183,18 @@ function buildPrompt(
   // Handle conditional sections: {{#key}}...{{/key}}
   let rendered = template;
 
+  // {{#commentId}}...{{/commentId}} — user comment (HIGHEST priority, process first)
+  rendered = rendered.replace(
+    /\{\{#commentId\}\}([\s\S]*?)\{\{\/commentId\}\}/g,
+    commentId ? "$1" : "",
+  );
+
+  // {{#wakeReason}}...{{/wakeReason}} — include if wake reason known
+  rendered = rendered.replace(
+    /\{\{#wakeReason\}\}([\s\S]*?)\{\{\/wakeReason\}\}/g,
+    wakeReason ? "$1" : "",
+  );
+
   // {{#taskId}}...{{/taskId}} — include if task is assigned
   rendered = rendered.replace(
     /\{\{#taskId\}\}([\s\S]*?)\{\{\/taskId\}\}/g,
@@ -176,12 +205,6 @@ function buildPrompt(
   rendered = rendered.replace(
     /\{\{#noTask\}\}([\s\S]*?)\{\{\/noTask\}\}/g,
     taskId ? "" : "$1",
-  );
-
-  // {{#commentId}}...{{/commentId}} — include if comment exists
-  rendered = rendered.replace(
-    /\{\{#commentId\}\}([\s\S]*?)\{\{\/commentId\}\}/g,
-    commentId ? "$1" : "",
   );
 
   // Replace remaining {{variable}} placeholders
@@ -205,17 +228,39 @@ const TOKEN_USAGE_REGEX =
 /** Regex to extract cost from Hermes output. */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
 
-interface ParsedOutput {
+export interface ParsedOutput {
   sessionId?: string;
   response?: string;
   usage?: UsageSummary;
   costUsd?: number;
   errorMessage?: string;
+  terminalFailure?: boolean;
 }
 
 // ---------------------------------------------------------------------------
 // Response cleaning
 // ---------------------------------------------------------------------------
+
+// Hermes prints provider failures on stdout and may still exit with code 0.
+// Keep those diagnostics out of summaries so a real fallback response remains
+// distinguishable from a terminal provider failure.
+const PROVIDER_DIAGNOSTIC_LINE_RE =
+  /^(?:[^\p{L}\p{N}\s]+\s*)?(?:Auxiliary title generation failed|API call failed|Provider:|Error:\s*HTTP\s+\d{3}|Details:|Billing or credits exhausted|Primary model failed|Authentication failed|Rate limited|Final error:|allowance(?:\s|$))/iu;
+
+const TERMINAL_PROVIDER_FAILURE_RE =
+  /(?:API call failed after \d+ retries|Rate limited after \d+ retries|Final error:\s*HTTP\s+\d{3})/i;
+
+function isProviderDiagnosticLine(line: string): boolean {
+  return PROVIDER_DIAGNOSTIC_LINE_RE.test(line.trim());
+}
+
+function lastTerminalProviderFailure(text: string): string | undefined {
+  let last: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    if (TERMINAL_PROVIDER_FAILURE_RE.test(line)) last = line.trim();
+  }
+  return last;
+}
 
 /** Strip noise lines from a Hermes response (tool output, system messages, etc.) */
 function cleanResponse(raw: string): string {
@@ -225,6 +270,7 @@ function cleanResponse(raw: string): string {
       const t = line.trim();
       if (!t) return true; // keep blank lines for paragraph separation
       if (t.startsWith("[tool]") || t.startsWith("[hermes]") || t.startsWith("[paperclip]")) return false;
+      if (isProviderDiagnosticLine(t)) return false;
       if (t.startsWith("session_id:")) return false;
       if (/^\[\d{4}-\d{2}-\d{2}T/.test(t)) return false;
       if (/^\[done\]\s*┊/.test(t)) return false;
@@ -243,10 +289,72 @@ function cleanResponse(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Banner-only stale-session detection (BOO-456)
+// ---------------------------------------------------------------------------
+
+/**
+ * Startup banner markers. A stale resumed session prints the startup banner
+ * (quiet mode normally suppresses it — its presence signals the stale path),
+ * then exits without loading current instructions/skills or doing any work.
+ */
+const STARTUP_BANNER_HEADER_RE = /hermes agent\s+v?[\d.]/i;
+const STARTUP_BANNER_LIST_RE = /available (tools|skills)/i;
+
+/**
+ * Tool-call markers in raw stdout that prove a run actually did work.
+ * A productive run has at least one of these; a banner-only run has none.
+ */
+const TOOL_ACTIVITY_RES = [
+  /^\s*\[tool\]/m, // non-quiet tool start lines
+  /^\s*\[done\]\s*┊/m, // pipe-mode tool completion lines
+  /tool_call|tool_use|tool_result|toolResult/i,
+  /<tool_call>|<tool_use>|<tool_result>/i,
+  /(?:calling|invoking|running)\s+(?:the\s+)?tool/i,
+];
+
+function hasToolActivity(stdout: string): boolean {
+  if (TOOL_ACTIVITY_RES.some((re) => re.test(stdout))) return true;
+  // Quiet-mode tool lines: "┊ {emoji} {verb} ..." — but NOT "┊ 💬 {assistant}".
+  // (A negative-lookahead regex is unreliable here because \s* can backtrack
+  // past the space between ┊ and 💬; check per-line instead.)
+  return stdout.split("\n").some((line) => {
+    const t = line.trim();
+    if (!t.startsWith("┊")) return false;
+    return !t.slice(1).trimStart().startsWith("💬");
+  });
+}
+
+function isStartupBanner(text: string): boolean {
+  const t = text.toLowerCase();
+  return STARTUP_BANNER_HEADER_RE.test(t) && STARTUP_BANNER_LIST_RE.test(t);
+}
+
+/**
+ * Detect the stale-session fingerprint (BOO-454): a resumed run whose output
+ * is empty or consists only of the Hermes startup banner, with zero tool calls
+ * and no substantive content after cleaning. Such runs must NOT persist their
+ * session — the next run should start fresh so it loads current instructions
+ * and skills instead of looping on the broken resumed session.
+ *
+ * Exported for verification/testing (AC5).
+ */
+export function isBannerOnlyRun(
+  stdout: string,
+  response: string | undefined,
+): boolean {
+  // Any tool activity means the run did real work — keep the session.
+  if (hasToolActivity(stdout)) return false;
+
+  const resp = (response ?? "").trim();
+  // Empty response with no tool calls, or banner-text-only response.
+  return resp.length === 0 || isStartupBanner(resp);
+}
+
+// ---------------------------------------------------------------------------
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -302,6 +410,16 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     }
   }
 
+  // Hermes reports exhausted credits/rate limits on stdout and can still
+  // return exit code 0. A terminal marker with no substantive response is a
+  // failed run; an actual fallback response remains successful.
+  const terminalFailure =
+    lastTerminalProviderFailure(stdout) ?? lastTerminalProviderFailure(stderr);
+  if (terminalFailure && !result.response) {
+    result.errorMessage = terminalFailure;
+    result.terminalFailure = true;
+  }
+
   return result;
 }
 
@@ -323,6 +441,10 @@ export async function execute(
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
+  // BOO-456: drop the session of banner-only resumed runs so the next run
+  // starts fresh (stale sessions loop forever otherwise). Default: on.
+  const freshSessionOnBannerOnly =
+    cfgBoolean(config.freshSessionOnBannerOnly) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
@@ -396,10 +518,15 @@ export async function execute(
   // system is designed for human-attended interactive sessions.
   args.push("--yolo");
 
-  // Session resume
-  const prevSessionId = cfgString(
-    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
-  );
+  // Session resume — SKIP when a user comment triggered this wake.
+  // Resuming a routine-heavy session drowns the user message (Pattern M).
+  // Fresh session ensures the 🚨 USER MESSAGE block takes full priority.
+  // NOTE: commentId is in ctx.context (Paperclip 2026.513.0+) with ctx.config fallback.
+  const taskCtxForResume = (ctx.context ?? ctx.config ?? {}) as Record<string, unknown>;
+  const hasComment = cfgString(taskCtxForResume.commentId);
+  const prevSessionId = hasComment
+    ? undefined
+    : cfgString((ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId);
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
@@ -491,7 +618,10 @@ export async function execute(
 
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
-    exitCode: result.exitCode,
+    // Hermes' wrapper may swallow provider failures and exit 0. Convert only
+    // the high-confidence terminal failure marker; ordinary stderr warnings
+    // retain the child process exit code.
+    exitCode: parsed.terminalFailure && result.exitCode === 0 ? 1 : result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
     provider: resolvedProvider,
@@ -523,11 +653,33 @@ export async function execute(
     cost_usd: parsed.costUsd ?? null,
   };
 
+  // BOO-456: banner-only resumed runs (stale-session fingerprint) must NOT
+  // persist their session — the next run for this issue starts fresh and
+  // loads current instructions/skills instead of looping on the broken
+  // session. Productive resumed runs keep persisting exactly as before.
+  const dropBannerOnlySession =
+    freshSessionOnBannerOnly &&
+    prevSessionId !== undefined &&
+    isBannerOnlyRun(result.stdout || "", parsed.response);
+
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    if (dropBannerOnlySession) {
+      await ctx.onLog(
+        "stdout",
+        "[hermes] Banner-only resumed run detected (BOO-456) — session NOT persisted; next run starts fresh\n",
+      );
+    } else {
+      executionResult.sessionParams = { sessionId: parsed.sessionId };
+      executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    }
   }
+
+  // Surface the drop decision in resultJson so the board can verify AC1/AC5.
+  executionResult.resultJson = {
+    ...(executionResult.resultJson || {}),
+    session_dropped_banner_only: dropBannerOnlySession || null,
+  };
 
   return executionResult;
 }

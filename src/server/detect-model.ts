@@ -61,6 +61,13 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
     const trimmed = line.trimEnd();
     const indent = line.length - line.trimStart().length;
 
+    // Check for flat model config
+    const inlineModelMatch = trimmed.match(/^model:\s*(.+)$/);
+    if (inlineModelMatch && indent === 0) {
+      model = inlineModelMatch[1].trim().replace(/#.*$/, "").trim().replace(/^['"]|['"]$/g, "");
+      continue;
+    }
+
     // Track model: section (indent 0)
     if (/^model:\s*$/.test(trimmed) && indent === 0) {
       inModelSection = true;

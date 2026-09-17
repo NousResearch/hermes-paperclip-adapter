@@ -53,6 +53,9 @@ export function buildHermesConfig(
 
   // Session persistence (default: on)
   ac.persistSession = true;
+  // BOO-456: drop sessions of banner-only resumed runs (stale-session
+  // fingerprint) so the next run starts fresh. Default: on.
+  ac.freshSessionOnBannerOnly = true;
 
   // Working directory
   if (v.cwd) {
