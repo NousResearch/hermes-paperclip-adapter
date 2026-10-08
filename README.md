@@ -203,6 +203,7 @@ The adapter scans two skill sources and merges them:
 
 - **Paperclip-managed skills** — bundled with the adapter, togglable from the UI
 - **Hermes-native skills** — from `~/.hermes/skills/`, read-only, always loaded
+- **Matrix Sovereign FDE Skills** — provided via `skills/matrix_sovereign_fde/` and [`hermes-matrix-adapter`](https://github.com/AAH20/hermes-matrix-adapter) for Causal Digital Twin queries, blast-radius reachability, Palantir JSON-LD exports, and ActionLedger SHA-256 receipts.
 
 The `listSkills` / `syncSkills` APIs expose a unified snapshot so the
 Paperclip UI can display both managed and native skills in one view.
